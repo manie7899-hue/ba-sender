@@ -8,8 +8,8 @@ OLX_LOGIN_URL = "https://www.olx.ba/login"
 OLX_MESSAGES_URL = "https://www.olx.ba/poruke"
 OLX_PROFILE_URL = "https://www.olx.ba/profil"
 
-DEFAULT_DELAY_MIN = 1
-DEFAULT_DELAY_MAX = 2
+DEFAULT_DELAY_MIN = 3
+DEFAULT_DELAY_MAX = 5
 DEFAULT_MAX_CONCURRENT = 3
 
 BLOCKED_KEYWORDS = [

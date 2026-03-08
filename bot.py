@@ -656,7 +656,7 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
     data = load_user_data(user_id)
     jobs_raw = data.get("jobs", [])
     message = data.get("message", "Zdravo!")
-    dmin, dmax = data.get("delay_min", 1), data.get("delay_max", 2)
+    dmin, dmax = data.get("delay_min", 3), data.get("delay_max", 5)
     tg_key = data.get("telegram_api_key", "")
     tg_enabled = data.get("telegram_api_enabled", False)
     tg_proxy = data.get("telegram_api_proxy", "").strip() or None
@@ -795,8 +795,9 @@ async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> 
 def main():
     global _bot_app
     if not BOT_TOKEN:
-        print("Укажите BOT_TOKEN в config.py")
-        return
+        msg = "ОШИБКА: BOT_TOKEN не задан. Добавьте переменную BOT_TOKEN в Environment (Render)."
+        print(msg)
+        raise SystemExit(msg)
     app = Application.builder().token(BOT_TOKEN).build()
     _bot_app = app
     app.add_error_handler(_error_handler)

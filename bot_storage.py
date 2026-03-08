@@ -5,7 +5,20 @@ import json
 from pathlib import Path
 from typing import Optional
 
-BOT_STORAGE_DIR = Path(__file__).parent / "bot_data"
+# На Render диск может быть read-only — используем /tmp
+def _storage_dir() -> Path:
+    base = Path(__file__).parent / "bot_data"
+    try:
+        base.mkdir(exist_ok=True)
+        (base / ".write_test").write_text("ok")
+        (base / ".write_test").unlink()
+        return base
+    except (OSError, PermissionError):
+        tmp = Path("/tmp") / "ba_sender_bot_data"
+        tmp.mkdir(exist_ok=True)
+        return tmp
+
+BOT_STORAGE_DIR = _storage_dir()
 _COUNTER_FILE = BOT_STORAGE_DIR / "_next_bot_id.json"
 _SEARCH_ID_FILE = BOT_STORAGE_DIR / "_next_search_id.json"
 
@@ -56,8 +69,8 @@ def _default_data() -> dict:
     return {
         "accounts": [],
         "message": "Zdravo! Zanima me ovaj oglas. Da li je još uvijek dostupan?",
-        "delay_min": 1,
-        "delay_max": 2,
+        "delay_min": 3,
+        "delay_max": 5,
         "telegram_api_key": "",
         "telegram_api_proxy": "",
         "telegram_api_enabled": False,
