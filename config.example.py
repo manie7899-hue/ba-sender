@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Пример конфигурации. Скопируйте в config.py и заполните."""
+"""Пример конфигурации. Скопируйте в config.py и заполните. На Render — env vars."""
+
+import os
 
 OLX_BASE_URL = "https://www.olx.ba"
 OLX_LOGIN_URL = "https://www.olx.ba/login"
@@ -24,10 +26,10 @@ REDSCRIPT_API_BASE = "https://api.redscript.info"
 REDSCRIPT_API_KEY = ""
 REDSCRIPT_SERVICE = "OLX"
 
-# Токен бота (или задайте через env BOT_TOKEN)
-BOT_TOKEN = ""
+# Токен бота (env BOT_TOKEN на Render)
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# ID чата для заявок (или env ADMIN_CHAT_ID). 0 = модерация выключена
-ADMIN_CHAT_ID = 0
+# ID чата для заявок (env ADMIN_CHAT_ID). 0 = модерация выключена
+ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))
 
 SCREENSHOT_AFTER_SEND = True
