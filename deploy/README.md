@@ -1,10 +1,22 @@
 # Развёртывание BA Sender на хост
 
-## Быстрый старт (VPS Ubuntu/Debian)
+## Публикация в Git
+
+```bash
+# 1. Создайте репозиторий на GitHub/GitLab (пустой, без README)
+
+# 2. Добавьте remote и запушьте
+cd "C:\Users\ucomp\OneDrive\Desktop\BA send"
+git remote add origin https://github.com/ВАШ_ЛОГИН/ba-sender.git
+git branch -M main
+git push -u origin main
+```
+
+## Быстрый старт на VPS (Ubuntu/Debian)
 
 ```bash
 # 1. Клонировать репозиторий
-git clone <URL_РЕПОЗИТОРИЯ> /opt/ba-sender
+git clone https://github.com/ВАШ_ЛОГИН/ba-sender.git /opt/ba-sender
 cd /opt/ba-sender
 
 # 2. Установить зависимости
