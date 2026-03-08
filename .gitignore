@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+
+# Секреты и данные
+config.py
+bot_data/
+bot_data/
+ba_sender_data.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build
+dist/
+build/
+*.spec
+*.exe
+
+# Logs
+*.log

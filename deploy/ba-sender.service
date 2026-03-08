@@ -1,0 +1,15 @@
+[Unit]
+Description=BA Sender Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/ba-sender
+Environment="PATH=/opt/ba-sender/venv/bin"
+ExecStart=/opt/ba-sender/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

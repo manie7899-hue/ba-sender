@@ -1,0 +1,5 @@
+# Только для Telegram-бота на сервере (без GUI)
+playwright>=1.40.0
+requests>=2.28.0
+PySocks>=1.7.0
+python-telegram-bot>=21.0
