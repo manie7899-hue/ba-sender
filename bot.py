@@ -942,10 +942,11 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
     accounts = data.get("accounts", [])
     jobs = []
 
-    proxies = data.get("proxies", [])
+    proxies = list(data.get("proxies", []))
+    proxies_to_remove = []
 
     if links:
-        # Режим: ссылки при запуске, ротация по аккаунтам, рандомный прокси
+        # Режим: ссылки при запуске, ротация по аккаунтам, один прокси на аккаунт (удаляется после)
         if not accounts:
             await context.bot.send_message(user_id, "❌ Добавьте аккаунты.")
             return
@@ -953,10 +954,13 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
         for i, acc in enumerate(accounts):
             acc_links = [links[j] for j in range(i, len(links), n)]
             if acc_links:
-                proxy_str = random.choice(proxies).strip() if proxies else None
+                proxy_str = None
+                if proxies:
+                    proxy_str = proxies.pop(0).strip()
+                    proxies_to_remove.append(proxy_str)
                 jobs.append((acc, proxy_str, acc_links))
     else:
-        # Режим: сессии из jobs (старый), прокси из сессии или рандом
+        # Режим: сессии из jobs, прокси из сессии или один из списка (удаляется после)
         jobs_raw = data.get("jobs", [])
         acc_map = {a.get("email"): a for a in accounts}
         for j in jobs_raw:
@@ -968,7 +972,8 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
                 continue
             proxy_str = j.get("proxy", "").strip() or None
             if not proxy_str and proxies:
-                proxy_str = random.choice(proxies).strip()
+                proxy_str = proxies.pop(0).strip()
+                proxies_to_remove.append(proxy_str)
             jobs.append((acc, proxy_str, acc_links))
 
     if not jobs:
@@ -1024,6 +1029,13 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
         except Exception as e:
             asyncio.create_task(_log(user_id, f"Скриншот не отправлен: {e}", context))
 
+    def remove_account_from_data(acc: dict):
+        data = load_user_data(user_id)
+        accs = [a for a in data.get("accounts", []) if a.get("email") != acc.get("email")]
+        data["accounts"] = accs
+        save_user_data(user_id, data)
+        on_log(f"🗑 Аккаунт {acc.get('email', '?')} удалён (не удалось войти)")
+
     async def _do_run():
         try:
             sender = OLXSender(delay_min=dmin, delay_max=dmax, max_concurrent=3, on_log=on_log)
@@ -1031,16 +1043,35 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
             built_jobs = []
             for acc, proxy_str, acc_links in jobs:
                 tasks = [SendTask(id=str(uuid.uuid4()), listing_url=link, message=message, created_at=0) for link in acc_links]
-                if tg_enabled and tg_key:
-                    on_log("Создание ссылок RedScript...")
-                    api_proxy = tg_proxy or proxy_str
-                    for task in tasks:
-                        title, price = fetch_listing_data(task.listing_url, api_proxy)
-                        link = create_telegram_link(tg_key, task.listing_url, title=title, price=price, on_debug=on_log, proxy=api_proxy)
-                        if link:
-                            task.message_link = link
                 built_jobs.append((acc, proxy_str, tasks))
-            await sender.run_jobs(built_jobs, on_status=on_status, on_screenshot=on_screenshot if SCREENSHOT_AFTER_SEND else None)
+
+            def create_link_for_task(task):
+                api_proxy = tg_proxy
+                for _, proxy_str, acc_tasks in built_jobs:
+                    if task in acc_tasks:
+                        api_proxy = tg_proxy or proxy_str
+                        break
+                title, price, image_url = fetch_listing_data(task.listing_url, api_proxy)
+                link = create_telegram_link(tg_key, task.listing_url, title=title, price=price, image=image_url, on_debug=on_log, proxy=api_proxy)
+                if link:
+                    task.message_link = link
+
+            create_link_fn = (create_link_for_task if tg_enabled and tg_key else None)
+            await sender.run_jobs(
+                built_jobs,
+                on_status=on_status,
+                on_screenshot=on_screenshot if SCREENSHOT_AFTER_SEND else None,
+                on_login_failed=remove_account_from_data,
+                create_link_fn=create_link_fn,
+            )
+            for p in proxies_to_remove:
+                data = load_user_data(user_id)
+                pl = data.get("proxies", [])
+                if p in pl:
+                    pl.remove(p)
+                    data["proxies"] = pl
+                    save_user_data(user_id, data)
+                    on_log(f"🗑 Прокси {p[:30]}... удалён после использования")
             await sender.stop()
             on_log("✅ Завершено")
             total = stats["success"] + stats["error"] + stats["skipped"]

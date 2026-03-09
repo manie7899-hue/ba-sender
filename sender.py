@@ -979,13 +979,19 @@ class OLXSender:
         tasks: list[SendTask], 
         on_status: Optional[Callable] = None,
         on_screenshot: Optional[Callable[[bytes, str], Awaitable[None]]] = None,
-        context = None
+        context = None,
+        create_link_fn: Optional[Callable] = None,
     ):
         """Запуск всех задач последовательно (по одному продавцу за раз)"""
         ctx = context or self._context
         for i, task in enumerate(tasks):
             if not self._running:
                 break
+            if create_link_fn and not task.message_link:
+                if asyncio.iscoroutinefunction(create_link_fn):
+                    await create_link_fn(task)
+                else:
+                    create_link_fn(task)
             await self.send_message(task, on_status=on_status, on_screenshot=on_screenshot, context=ctx)
             # Задержка перед следующим сообщением (кроме последнего)
             if i < len(tasks) - 1:
@@ -1000,6 +1006,8 @@ class OLXSender:
         tasks: list[SendTask],
         on_status: Optional[Callable] = None,
         on_screenshot: Optional[Callable[[bytes, str], Awaitable[None]]] = None,
+        on_login_failed: Optional[Callable[[dict], None]] = None,
+        create_link_fn: Optional[Callable] = None,
     ) -> bool:
         """Выполнить одну сессию: контекст с прокси, вход, отправка"""
         if not self._browser or not self._running:
@@ -1010,9 +1018,11 @@ class OLXSender:
             ok = await self.login(account.get("email", ""), account.get("password", ""), context=job_ctx)
             if not ok:
                 self._log(f"⚠ Не удалось войти: {account.get('email', '?')}")
+                if on_login_failed:
+                    on_login_failed(account)
                 return False
             self._log("✓ Вход выполнен успешно")
-            await self.run_tasks(tasks, on_status=on_status, on_screenshot=on_screenshot, context=job_ctx)
+            await self.run_tasks(tasks, on_status=on_status, on_screenshot=on_screenshot, context=job_ctx, create_link_fn=create_link_fn)
             return True
         finally:
             await job_ctx.close()
@@ -1022,7 +1032,12 @@ class OLXSender:
         jobs: list[tuple[dict, str, list[SendTask]]],
         on_status: Optional[Callable] = None,
         on_screenshot: Optional[Callable[[bytes, str], Awaitable[None]]] = None,
+        on_login_failed: Optional[Callable[[dict], None]] = None,
+        create_link_fn: Optional[Callable] = None,
     ):
         """Запуск нескольких сессий одновременно (параллельно)"""
-        coros = [self.run_single_job(acc, proxy_str, tasks, on_status, on_screenshot) for acc, proxy_str, tasks in jobs]
+        coros = [
+            self.run_single_job(acc, proxy_str, tasks, on_status, on_screenshot, on_login_failed, create_link_fn)
+            for acc, proxy_str, tasks in jobs
+        ]
         await asyncio.gather(*coros)

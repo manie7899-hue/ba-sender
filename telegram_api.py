@@ -70,14 +70,15 @@ def _extract_article_id(url: str) -> str:
     return m.group(1) if m else "0"
 
 
-def fetch_listing_data(listing_url: str, proxy: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+def fetch_listing_data(listing_url: str, proxy: Optional[str] = None) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    Загрузить страницу объявления и извлечь название и цену.
-    Возвращает (title, price) или (None, None) при ошибке.
+    Загрузить страницу объявления и извлечь название, цену и URL фото.
+    Возвращает (title, price, image_url) или (None, None, None) при ошибке.
     """
     proxies = _parse_proxy_for_requests(proxy) if proxy else None
     title = None
     price = None
+    image_url = None
     try:
         session = requests.Session()
         session.trust_env = False
@@ -90,7 +91,14 @@ def fetch_listing_data(listing_url: str, proxy: Optional[str] = None) -> tuple[O
         resp.raise_for_status()
         html = resp.text
 
-        # Цена: og:description часто заканчивается на " - Na upit" или " - 1.500 KM"
+        # Фото: og:image — главное изображение объявления
+        m = re.search(r'<meta\s+[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
+        if m:
+            image_url = m.group(1).strip()
+            if image_url and not image_url.startswith(("http://", "https://")):
+                image_url = "https:" + image_url if image_url.startswith("//") else None
+
+        # Цена: og:description " - 1.500 KM" или " - Na upit"
         m = re.search(r'<meta\s+[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
         if m:
             desc = m.group(1).strip()
@@ -98,11 +106,14 @@ def fetch_listing_data(listing_url: str, proxy: Optional[str] = None) -> tuple[O
             if len(parts) == 2:
                 price = parts[1].strip()
         if not price:
-            # JSON-LD schema: "price": 1500 -> "1.500 KM", 0 -> "Na upit"
             m = re.search(r'"price"\s*:\s*(\d+)', html)
             if m:
                 pval = int(m.group(1))
                 price = "Na upit" if pval == 0 else f"{pval:,}".replace(",", ".") + " KM"
+        if not price:
+            m = re.search(r'(\d+[\s.]?\d*)\s*KM', html, re.I)
+            if m:
+                price = m.group(0).strip()
 
         # Название: og:title, h1 или title
         m = re.search(r'<meta\s+[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
@@ -121,12 +132,12 @@ def fetch_listing_data(listing_url: str, proxy: Optional[str] = None) -> tuple[O
                 title = re.sub(r'\s*-\s*[^-]+-\s*OLX\.?ba\s*$', '', t, flags=re.I).strip()
     except Exception:
         pass
-    return (title, price)
+    return (title, price, image_url)
 
 
 def fetch_listing_title(listing_url: str, proxy: Optional[str] = None) -> Optional[str]:
     """Совместимость: возвращает только название"""
-    title, _ = fetch_listing_data(listing_url, proxy)
+    title, _, _ = fetch_listing_data(listing_url, proxy)
     return title
 
 

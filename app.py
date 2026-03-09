@@ -623,8 +623,8 @@ class BASenderApp(ctk.CTk):
                     def _tg_log(m):
                         self.after(0, lambda msg=m: self._log(msg))
                     for task in tasks:
-                        title, price = fetch_listing_data(task.listing_url, tg_proxy)
-                        link = create_telegram_link(tg_api_key, task.listing_url, title=title, price=price, on_debug=_tg_log, proxy=tg_proxy, api_base=tg_api_url)
+                        title, price, image_url = fetch_listing_data(task.listing_url, tg_proxy)
+                        link = create_telegram_link(tg_api_key, task.listing_url, title=title, price=price, image=image_url, on_debug=_tg_log, proxy=tg_proxy, api_base=tg_api_url)
                         if link:
                             task.message_link = link
                             self.after(0, lambda u=task.listing_url[:50]: self._log(f"✓ Ссылка: {u}..."))
