@@ -20,6 +20,7 @@ from bot_storage import (
     load_user_data, save_user_data, list_pending_users,
     get_or_create_bot_user_id, get_next_search_id,
     is_seller_blacklisted, add_seller_to_blacklist,
+    is_user_banned, add_banned_user, remove_banned_user,
 )
 from sender import OLXSender, SendTask
 from telegram_api import create_telegram_link, fetch_listing_data
@@ -105,7 +106,9 @@ def _admin_chat_enabled() -> bool:
 
 
 def _user_has_access(uid: int) -> bool:
-    """Проверка доступа: если модерация выключена — все имеют доступ."""
+    """Проверка доступа: бан > модерация. Одобренные запоминаются."""
+    if is_user_banned(uid):
+        return False
     if not _admin_chat_enabled():
         return True
     data = load_user_data(uid)
@@ -225,6 +228,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     data = load_user_data(uid)
     d = query.data
+
+    if is_user_banned(uid) and not d.startswith("req_approve_") and not d.startswith("req_reject_"):
+        try:
+            await query.edit_message_text("❌ Вы заблокированы.")
+        except Exception:
+            pass
+        return
 
     # === АДМИН: ОДОБРЕНИЕ / ОТКЛОНЕНИЕ ЗАЯВКИ ===
     if d.startswith("req_approve_") or d.startswith("req_reject_"):
@@ -650,6 +660,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     data = load_user_data(uid)
 
+    if is_user_banned(uid):
+        await update.message.reply_text("❌ Вы заблокированы.")
+        return
     if not _user_has_access(uid):
         if text != "/start":
             await update.message.reply_text("Для работы нужен доступ. Нажмите /start", reply_markup=_kb_request_access())
@@ -912,6 +925,60 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
     _running_tasks[user_id] = asyncio.create_task(_do_run())
 
 
+async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /ban — только в чате панели. /ban @username или /ban ID"""
+    if update.effective_chat.id != ADMIN_CHAT_ID or not _admin_chat_enabled():
+        return
+    args = (context.args or [])
+    if not args:
+        await update.message.reply_text("Использование: /ban @username или /ban 123456789")
+        return
+    arg = args[0].strip()
+    target_id = None
+    if arg.isdigit():
+        target_id = int(arg)
+    elif arg.startswith("@"):
+        try:
+            chat = await context.bot.get_chat(arg)
+            target_id = chat.id
+        except Exception as e:
+            await update.message.reply_text(f"Не удалось найти пользователя {arg}: {e}")
+            return
+    else:
+        await update.message.reply_text("Укажите @username или числовой ID")
+        return
+    if target_id:
+        add_banned_user(target_id)
+        await update.message.reply_text(f"✅ Пользователь {arg} (ID: {target_id}) заблокирован.")
+
+
+async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /unban — только в чате панели. /unban @username или /unban ID"""
+    if update.effective_chat.id != ADMIN_CHAT_ID or not _admin_chat_enabled():
+        return
+    args = (context.args or [])
+    if not args:
+        await update.message.reply_text("Использование: /unban @username или /unban 123456789")
+        return
+    arg = args[0].strip()
+    target_id = None
+    if arg.isdigit():
+        target_id = int(arg)
+    elif arg.startswith("@"):
+        try:
+            chat = await context.bot.get_chat(arg)
+            target_id = chat.id
+        except Exception as e:
+            await update.message.reply_text(f"Не удалось найти пользователя {arg}: {e}")
+            return
+    else:
+        await update.message.reply_text("Укажите @username или числовой ID")
+        return
+    if target_id:
+        remove_banned_user(target_id)
+        await update.message.reply_text(f"✅ Пользователь {arg} (ID: {target_id}) разблокирован.")
+
+
 async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /panel — только в чате панели. Показать заявки на рассмотрении."""
     if update.effective_chat.id != ADMIN_CHAT_ID or not _admin_chat_enabled():
@@ -936,6 +1003,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _clear_step(context)
     uid = update.effective_user.id
     data = load_user_data(uid)
+
+    if is_user_banned(uid):
+        await update.message.reply_text("❌ Вы заблокированы.")
+        return
 
     if _admin_chat_enabled() and not _user_has_access(uid):
         status = data.get("access_status", "new")
@@ -989,6 +1060,8 @@ def main():
     app.add_error_handler(_error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("panel", panel_cmd))
+    app.add_handler(CommandHandler("ban", ban_cmd))
+    app.add_handler(CommandHandler("unban", unban_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("Бот запущен.")

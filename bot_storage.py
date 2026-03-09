@@ -143,6 +143,45 @@ def add_seller_to_blacklist(seller_username: str) -> bool:
     return _save_blacklist(s)
 
 
+_BANNED_FILE = BOT_STORAGE_DIR / "banned_users.json"
+
+
+def _load_banned() -> set:
+    try:
+        if _BANNED_FILE.exists():
+            with open(_BANNED_FILE, "r", encoding="utf-8") as f:
+                return set(int(x) for x in json.load(f) if str(x).isdigit())
+    except Exception:
+        pass
+    return set()
+
+
+def _save_banned(user_ids: set) -> bool:
+    try:
+        BOT_STORAGE_DIR.mkdir(exist_ok=True)
+        with open(_BANNED_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(user_ids), f)
+        return True
+    except Exception:
+        return False
+
+
+def is_user_banned(user_id: int) -> bool:
+    return user_id in _load_banned()
+
+
+def add_banned_user(user_id: int) -> bool:
+    s = _load_banned()
+    s.add(user_id)
+    return _save_banned(s)
+
+
+def remove_banned_user(user_id: int) -> bool:
+    s = _load_banned()
+    s.discard(user_id)
+    return _save_banned(s)
+
+
 def list_pending_users() -> list[tuple[int, dict]]:
     """Список пользователей со статусом pending."""
     result = []
