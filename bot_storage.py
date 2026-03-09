@@ -2,11 +2,18 @@
 """Хранение данных пользователей Telegram-бота"""
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
-# На Render диск может быть read-only — используем /tmp
+# BOT_DATA_PATH — путь для постоянного хранения (Render: Persistent Disk)
+# Без него данные теряются при каждом деплое
 def _storage_dir() -> Path:
+    env_path = os.environ.get("BOT_DATA_PATH", "").strip()
+    if env_path:
+        base = Path(env_path) / "bot_data"
+        base.mkdir(parents=True, exist_ok=True)
+        return base
     base = Path(__file__).parent / "bot_data"
     try:
         base.mkdir(exist_ok=True)
