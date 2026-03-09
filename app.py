@@ -18,7 +18,7 @@ from storage import load_data, save_data
 try:
     from config import DEFAULT_DELAY_MIN, DEFAULT_DELAY_MAX, DEFAULT_MAX_CONCURRENT, REDSCRIPT_API_KEY
 except ImportError:
-    DEFAULT_DELAY_MIN, DEFAULT_DELAY_MAX = 3, 7
+    DEFAULT_DELAY_MIN, DEFAULT_DELAY_MAX = 2, 4
     DEFAULT_MAX_CONCURRENT = 2
     REDSCRIPT_API_KEY = ""
 from telegram_api import create_telegram_link, fetch_listing_data

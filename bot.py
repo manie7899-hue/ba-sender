@@ -6,6 +6,7 @@ BA Sender — Telegram-бот (кнопки, пошагово, редактир�
 import asyncio
 import logging
 import os
+import re
 import random
 import time
 import uuid
@@ -42,6 +43,8 @@ try:
 except (ImportError, AttributeError):
     SCREENSHOT_AFTER_SEND = True
 
+MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "5"))
+
 _running_tasks: dict[int, asyncio.Task] = {}
 _user_logs: dict[int, list[str]] = {}
 _run_log_msg: dict[int, dict] = {}  # user_id -> {chat_id, message_id, last_edit}
@@ -72,9 +75,19 @@ STEP_PROXY_MASS = "proxy_mass"     # массовое добавление пр�
 
 
 def _parse_links(text: str) -> list[str]:
+    """Парсит ссылки из текста. Поддерживает форматы:
+    - Link
+    - 1. Link
+    - 2. Link
+    - https://... или olx.ba/...
+    """
     links = []
     for line in text.strip().split("\n"):
         line = line.strip()
+        # Убираем префикс "1. ", "2. " и т.д.
+        m = re.match(r"^\s*\d+[.)]\s*", line)
+        if m:
+            line = line[m.end() :].strip()
         if line and ("olx.ba" in line or line.startswith("http")):
             if not line.startswith("http"):
                 line = "https://www.olx.ba" + line
@@ -748,7 +761,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["step"] = STEP_RUN_LINKS
         asyncio.create_task(_admin_log(uid, "Запросил ссылки для рассылки", context))
         await query.edit_message_text(
-            "📤 Отправьте ссылки на объявления (каждая с новой строки):\n\n"
+            "📤 Отправьте ссылки на объявления или файл .txt:\n\n"
+            "• Текст: каждая ссылка с новой строки\n"
+            "• Файл: формат 1. Link, 2. Link\n\n"
             "Ссылки распределятся по аккаунтам по кругу.",
             reply_markup=_kb_back("back"),
         )
@@ -771,11 +786,78 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"{header}:\n\n{txt}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ Назад", callback_data="nav_back")]]))
 
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка файла .txt со ссылками (формат: 1. Link, 2. Link)"""
+    uid = update.effective_user.id
+    if update.effective_user.username:
+        _username_cache[uid] = update.effective_user.username
+    data = load_user_data(uid)
+
+    if is_user_banned(uid):
+        await update.message.reply_text("❌ Вы заблокированы.")
+        return
+    if not _user_has_access(uid):
+        await update.message.reply_text("Для работы нужен доступ. Нажмите /start", reply_markup=_kb_request_access())
+        return
+
+    step = context.user_data.get("step")
+    if step not in (STEP_LINKS, STEP_RUN_LINKS, STEP_SESS_ADD_LINKS):
+        await update.message.reply_text("Отправьте файл .txt только когда бот просит добавить ссылки.")
+        return
+
+    doc = update.message.document
+    if not doc or not (doc.file_name or "").lower().endswith(".txt"):
+        await update.message.reply_text("Нужен файл .txt с ссылками (формат: 1. Link, 2. Link)")
+        return
+
+    try:
+        tg_file = await context.bot.get_file(doc.file_id)
+        buf = BytesIO()
+        await tg_file.download_to_memory(out=buf)
+        buf.seek(0)
+        text = buf.getvalue().decode("utf-8", errors="replace")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка чтения файла: {e}")
+        return
+
+    links = _parse_links(text)
+    if not links:
+        await update.message.reply_text("В файле не найдено ссылок на olx.ba. Формат: 1. Link")
+        return
+
+    if step == STEP_LINKS:
+        _clear_step(context)
+        data["jobs"] = data.get("jobs", [])
+        if data["jobs"]:
+            data["jobs"][-1]["links"] = links
+        else:
+            data["jobs"].append({"account_email": "", "proxy": "", "links": links})
+        save_user_data(uid, data)
+        await update.message.reply_text(f"✅ Сессия создана, {len(links)} ссылок из файла", reply_markup=_main_keyboard())
+
+    elif step == STEP_RUN_LINKS:
+        _clear_step(context)
+        asyncio.create_task(_admin_log(uid, f"Запуск рассылки: {len(links)} ссылок (из файла)", context))
+        await update.message.reply_text(f"▶️ Запуск: {len(links)} ссылок из файла", reply_markup=_main_keyboard())
+        await _run_sender(uid, context, links=links)
+
+    elif step == STEP_SESS_ADD_LINKS:
+        idx = context.user_data.get("sess_edit_idx", 0)
+        jobs = data.get("jobs", [])
+        if 0 <= idx < len(jobs):
+            jobs[idx]["links"] = links
+            save_user_data(uid, data)
+            _clear_step(context)
+            await update.message.reply_text(f"✅ Ссылки обновлены: {len(links)} шт. из файла", reply_markup=_main_keyboard())
+        else:
+            await update.message.reply_text("Ошибка: сессия не найдена.")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if update.effective_user.username:
         _username_cache[uid] = update.effective_user.username
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
     data = load_user_data(uid)
 
     if is_user_banned(uid):
@@ -831,7 +913,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "links": [],
             })
             save_user_data(uid, data)
-        await update.message.reply_text("Шаг 3/3: Отправьте ссылки (каждая с новой строки):", reply_markup=_kb_back("m_sess"))
+        await update.message.reply_text(
+            "Шаг 3/3: Отправьте ссылки (каждая с новой строки) или файл .txt:\n"
+            "Формат: 1. Link\n2. Link",
+            reply_markup=_kb_back("m_sess"),
+        )
 
     elif step == STEP_LINKS:
         links = _parse_links(text)
@@ -845,13 +931,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_user_data(uid, data)
             await update.message.reply_text(f"✅ Сессия создана, {len(links)} ссылок", reply_markup=_main_keyboard())
         else:
-            await update.message.reply_text("Отправьте ссылки на olx.ba")
+            await update.message.reply_text("Отправьте ссылки на olx.ba или файл .txt (формат: 1. Link)")
 
     elif step == STEP_RUN_LINKS:
         links = _parse_links(text)
         _clear_step(context)
         if not links:
-            await update.message.reply_text("Отправьте ссылки на olx.ba (каждая с новой строки)", reply_markup=_main_keyboard())
+            await update.message.reply_text("Отправьте ссылки на olx.ba или файл .txt (формат: 1. Link)", reply_markup=_main_keyboard())
             return
         asyncio.create_task(_admin_log(uid, f"Запуск рассылки: {len(links)} ссылок", context))
         await update.message.reply_text(f"▶️ Запуск: {len(links)} ссылок", reply_markup=_main_keyboard())
@@ -906,7 +992,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _clear_step(context)
             await update.message.reply_text(f"✅ Ссылки обновлены: {len(links)} шт.", reply_markup=_main_keyboard())
         else:
-            await update.message.reply_text("Отправьте ссылки на olx.ba (каждая с новой строки)")
+            await update.message.reply_text("Отправьте ссылки на olx.ba или файл .txt (формат: 1. Link)")
 
     elif step == STEP_MESSAGE:
         data["message"] = text
@@ -934,7 +1020,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=None, links: list = None):
     data = load_user_data(user_id)
     message = data.get("message", "Zdravo!")
-    dmin, dmax = data.get("delay_min", 3), data.get("delay_max", 5)
+    dmin, dmax = data.get("delay_min", 2), data.get("delay_max", 3)
     tg_key = data.get("telegram_api_key", "")
     tg_enabled = data.get("telegram_api_enabled", False)
     tg_proxy = data.get("telegram_api_proxy", "").strip() or None
@@ -943,10 +1029,10 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
     jobs = []
 
     proxies = list(data.get("proxies", []))
-    proxies_to_remove = []
+    proxies_to_remove = []  # заполняется только при успешном входе (on_proxy_used)
 
     if links:
-        # Режим: ссылки при запуске, ротация по аккаунтам, один прокси на аккаунт (удаляется после)
+        # Режим: ссылки при запуске, ротация по аккаунтам, один прокси на аккаунт (удаляется только после успешного входа)
         if not accounts:
             await context.bot.send_message(user_id, "❌ Добавьте аккаунты.")
             return
@@ -954,13 +1040,10 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
         for i, acc in enumerate(accounts):
             acc_links = [links[j] for j in range(i, len(links), n)]
             if acc_links:
-                proxy_str = None
-                if proxies:
-                    proxy_str = proxies.pop(0).strip()
-                    proxies_to_remove.append(proxy_str)
+                proxy_str = proxies.pop(0).strip() if proxies else None
                 jobs.append((acc, proxy_str, acc_links))
     else:
-        # Режим: сессии из jobs, прокси из сессии или один из списка (удаляется после)
+        # Режим: сессии из jobs, прокси из сессии или один из списка (удаляется только после успешного входа)
         jobs_raw = data.get("jobs", [])
         acc_map = {a.get("email"): a for a in accounts}
         for j in jobs_raw:
@@ -973,7 +1056,6 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
             proxy_str = j.get("proxy", "").strip() or None
             if not proxy_str and proxies:
                 proxy_str = proxies.pop(0).strip()
-                proxies_to_remove.append(proxy_str)
             jobs.append((acc, proxy_str, acc_links))
 
     if not jobs:
@@ -1036,9 +1118,12 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
         save_user_data(user_id, data)
         on_log(f"🗑 Аккаунт {acc.get('email', '?')} удалён (не удалось войти)")
 
+    def on_proxy_used(proxy_str: str):
+        proxies_to_remove.append(proxy_str)
+
     async def _do_run():
         try:
-            sender = OLXSender(delay_min=dmin, delay_max=dmax, max_concurrent=3, on_log=on_log)
+            sender = OLXSender(delay_min=dmin, delay_max=dmax, max_concurrent=MAX_CONCURRENT, on_log=on_log)
             await sender.start(headless=True, create_context=False)
             built_jobs = []
             for acc, proxy_str, acc_links in jobs:
@@ -1062,6 +1147,7 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
                 on_status=on_status,
                 on_screenshot=on_screenshot if SCREENSHOT_AFTER_SEND else None,
                 on_login_failed=remove_account_from_data,
+                on_proxy_used=on_proxy_used,
                 create_link_fn=create_link_fn,
             )
             for p in proxies_to_remove:
@@ -1240,7 +1326,14 @@ def main():
         msg = "ОШИБКА: BOT_TOKEN не задан. Добавьте переменную BOT_TOKEN в Environment (Render)."
         print(msg)
         raise SystemExit(msg)
-    app = Application.builder().token(BOT_TOKEN).build()
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(_on_startup)
+        .post_shutdown(_on_shutdown)
+        .build()
+    )
     _bot_app = app
     app.add_error_handler(_error_handler)
     app.add_handler(CommandHandler("start", start))
@@ -1250,9 +1343,44 @@ def main():
     app.add_handler(CommandHandler("unban", unban_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Бот запущен.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+
+    webhook_base = os.environ.get("WEBHOOK_URL", "").strip()
+    port = int(os.environ.get("PORT", "8443"))
+    if webhook_base and webhook_base.startswith("https://"):
+        url_path = "webhook"
+        full_url = webhook_base.rstrip("/") + f"/{url_path}"
+        logging.info("Запуск в режиме Webhook: %s", full_url[:60] + "...")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=url_path,
+            webhook_url=full_url,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        logging.info("Запуск в режиме Polling")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+async def _on_startup(app):
+    logging.info("BA Sender бот запущен")
+
+
+async def _on_shutdown(app):
+    logging.info("BA Sender бот останавливается...")
+    for t in list(_running_tasks.values()):
+        try:
+            t.cancel()
+        except Exception:
+            pass
+    if _running_tasks:
+        await asyncio.sleep(1.0)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        level=logging.INFO,
+    )
     main()

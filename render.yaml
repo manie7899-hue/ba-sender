@@ -8,3 +8,7 @@ services:
         sync: false
       - key: ADMIN_CHAT_ID
         sync: false
+      - key: BOT_DATA_PATH
+        value: /data
+      - key: MAX_CONCURRENT
+        value: "3"

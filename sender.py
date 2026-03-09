@@ -105,9 +105,9 @@ class OLXSender:
     
     def __init__(
         self,
-        delay_min: int = 3,
-        delay_max: int = 7,
-        max_concurrent: int = 3,
+        delay_min: int = 2,
+        delay_max: int = 4,
+        max_concurrent: int = 5,
         proxy: Optional[str] = None,
         proxy_list: Optional[list[str]] = None,
         on_log: Optional[Callable[[str], None]] = None,
@@ -131,7 +131,27 @@ class OLXSender:
             self._on_log(msg)
     
     async def _accept_consent_dialog(self, page) -> bool:
-        """Закрытие диалога согласия с cookies/Privacy (qc-cmp2)"""
+        """Закрытие диалога согласия с cookies/Privacy (qc-cmp2). Удаляет overlay при неудаче."""
+        # Сначала удаляем overlay — самый надёжный способ (баннер часто блокирует клики)
+        try:
+            removed = await page.evaluate("""() => {
+                let n = 0;
+                const sel = ['#qc-cmp2-container', '.qc-cmp2-container', '.qc-cmp-cleanslate', '[id^="qc-cmp"]'];
+                for (const s of sel) {
+                    try {
+                        const els = document.querySelectorAll(s);
+                        els.forEach(el => { el.remove(); n++; });
+                    } catch(e) {}
+                }
+                return n > 0;
+            }""")
+            if removed:
+                self._log("Удалён блокирующий баннер cookies (qc-cmp2)")
+                await asyncio.sleep(0.2)
+                return True
+        except Exception:
+            pass
+        # Пробуем клик по кнопке Accept
         consent_selectors = [
             '#qc-cmp2-ui button[class*="accept"]',
             '#qc-cmp2-ui button:has-text("Accept")',
@@ -145,6 +165,8 @@ class OLXSender:
             '[id="qc-cmp2-ui"] button',
             '.qc-cmp2-summary-buttons button',
             '[aria-label="Privacy"] button',
+            '#qc-cmp2-container button',
+            '.qc-cmp2-container button',
         ]
         for sel in consent_selectors:
             try:
@@ -157,13 +179,14 @@ class OLXSender:
             except Exception:
                 continue
         try:
-            await page.evaluate("""() => {
-                const btn = document.querySelector('#qc-cmp2-ui button, [aria-label="Privacy"] button, .qc-cmp2-summary-buttons button');
+            clicked = await page.evaluate("""() => {
+                const btn = document.querySelector('#qc-cmp2-ui button, #qc-cmp2-container button, [aria-label="Privacy"] button, .qc-cmp2-summary-buttons button');
                 if (btn) { btn.click(); return true; }
                 return false;
             }""")
-            await asyncio.sleep(0.2)
-            return True
+            if clicked:
+                await asyncio.sleep(0.2)
+                return True
         except Exception:
             pass
         return False
@@ -230,9 +253,9 @@ class OLXSender:
             page = await ctx.new_page()
             self._log("Переход на страницу входа...")
             await page.goto(OLX_LOGIN_URL, wait_until="load", timeout=30000)
-            await asyncio.sleep(0.6)
+            await asyncio.sleep(0.3)
             await self._accept_consent_dialog(page)
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.2)
             
             # Если уже залогинены — редирект
             if "login" not in page.url.lower():
@@ -345,7 +368,7 @@ class OLXSender:
             try:
                 await page.wait_for_url(lambda u: "login" not in u.lower(), timeout=10000)
             except Exception:
-                await asyncio.sleep(3)
+                await asyncio.sleep(0.8)
             url = page.url
             if "login" in url.lower():
                 try:
@@ -392,7 +415,7 @@ class OLXSender:
             page = await ctx.new_page()
             self._log("Проверка: переход на страницу входа...")
             await page.goto(OLX_LOGIN_URL, wait_until="load", timeout=30000)
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.2)
             await self._accept_consent_dialog(page)
             await asyncio.sleep(0.2)
             
@@ -438,7 +461,7 @@ class OLXSender:
                 await login_btn.click()
             self._log("Проверка: ожидание ответа...")
             
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.8)
             url = page.url
             page_text = (await page.content()).lower()
             body_text = await page.evaluate("() => document.body.innerText") or ""
@@ -528,19 +551,19 @@ class OLXSender:
                         except Exception as e:
                             self._log(f"Переход poruke (попытка {attempt+1}): {e}")
                             if attempt == 0:
-                                await asyncio.sleep(1.5)
+                                await asyncio.sleep(0.8)
                     if not navigated:
                         raise Exception("Не удалось перейти в Moje poruke (проверьте прокси)")
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(0.8)
                 await self._accept_consent_dialog(page)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.25)
                 # Обновляем страницу, чтобы список диалогов показал только что отправленное сообщение
                 self._log("Обновление страницы сообщений...")
                 try:
                     await page.reload(wait_until="domcontentloaded", timeout=15000)
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(0.8)
                     await self._accept_consent_dialog(page)
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.25)
                 except Exception as e:
                     self._log(f"Обновление страницы: {e}")
 
@@ -567,7 +590,7 @@ class OLXSender:
                                 await el.click(force=True)
                                 chat_clicked = True
                                 self._log(f"Открыт чат с {task.seller_username}")
-                                await asyncio.sleep(1.2)
+                                await asyncio.sleep(0.15)
                                 break
                         except Exception:
                             continue
@@ -595,7 +618,7 @@ class OLXSender:
                     if clicked:
                         chat_clicked = True
                         self._log("Открыт самый новый диалог")
-                        await asyncio.sleep(1.2)
+                        await asyncio.sleep(0.15)
                         try:
                             await page.wait_for_url(re.compile(r"/poruke/\d+|/poruka/\d+"), timeout=5000)
                             await asyncio.sleep(0.8)
@@ -612,7 +635,7 @@ class OLXSender:
                                         await el.click(force=True)
                                         chat_clicked = True
                                         self._log("Открыт диалог с продавцом")
-                                        await asyncio.sleep(1.2)
+                                        await asyncio.sleep(0.15)
                                         break
                             except Exception:
                                 continue
@@ -639,8 +662,48 @@ class OLXSender:
                         except Exception:
                             continue
 
-            await asyncio.sleep(1.5)
-            screenshot_bytes = await page.screenshot(type="png", full_page=False)
+            await asyncio.sleep(0.8)
+            # Скриншот только области диалога (без шапки и поля ввода)
+            screenshot_bytes = None
+            for sel in [
+                '[class*="message-list"]', '[class*="messages"]', '[class*="chat-messages"]',
+                '[class*="conversation-body"]', '[class*="chat-body"]', '[class*="thread-messages"]',
+                '[role="log"]', '[class*="MessageList"]', '[class*="message-list"]',
+                'main [class*="scroll"]', '[class*="conversation"] [class*="scroll"]',
+            ]:
+                try:
+                    el = await page.query_selector(sel)
+                    if el and await el.is_visible():
+                        box = await el.bounding_box()
+                        if box and box.get("width", 0) > 100 and box.get("height", 0) > 80:
+                            screenshot_bytes = await el.screenshot(type="png")
+                            self._log("Скриншот области диалога")
+                            break
+                except Exception:
+                    continue
+            if not screenshot_bytes:
+                try:
+                    rect = await page.evaluate("""() => {
+                        const bubbles = document.querySelectorAll('[class*="message"], [class*="bubble"], [class*="chat-message"]');
+                        if (bubbles.length === 0) return null;
+                        let minX=1e9, minY=1e9, maxX=0, maxY=0;
+                        for (const b of bubbles) {
+                            const r = b.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) {
+                                minX = Math.min(minX, r.left); minY = Math.min(minY, r.top);
+                                maxX = Math.max(maxX, r.right); maxY = Math.max(maxY, r.bottom);
+                            }
+                        }
+                        if (minX >= maxX || minY >= maxY) return null;
+                        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+                    }""")
+                    if rect and rect.get("width", 0) > 50 and rect.get("height", 0) > 50:
+                        screenshot_bytes = await page.screenshot(type="png", clip=rect)
+                        self._log("Скриншот области сообщений")
+                except Exception:
+                    pass
+            if not screenshot_bytes:
+                screenshot_bytes = await page.screenshot(type="png", full_page=False)
             caption = task.listing_url[:80] + ("..." if len(task.listing_url) > 80 else "")
             if asyncio.iscoroutinefunction(on_screenshot):
                 await on_screenshot(screenshot_bytes, caption)
@@ -677,9 +740,9 @@ class OLXSender:
                     short_url = task.listing_url[:60] + "..." if len(task.listing_url) > 60 else task.listing_url
                     self._log(f"Сообщение продавцу: {short_url}")
                     await page.goto(task.listing_url, wait_until="domcontentloaded", timeout=30000)
-                    await asyncio.sleep(random.uniform(0.2, 0.4))
+                    await asyncio.sleep(0.5)
                     await self._accept_consent_dialog(page)
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.2)
                     # Извлекаем никнейм продавца — ТОЛЬКО из блока с кнопкой Poruka (карточка продавца)
                     # Игнорируем шапку: там "Moj profil" = текущий юзер, его нельзя путать с продавцом
                     try:
@@ -715,52 +778,63 @@ class OLXSender:
                     if not task.seller_username:
                         self._log("Продавец не определён — проверка ЧС пропущена")
                     self._log("Поиск кнопки Poruka...")
-                    
+                    await asyncio.sleep(0.3)
+                    await self._accept_consent_dialog(page)
+                    await asyncio.sleep(0.2)
                     # Шаг 1: Нажать кнопку "Poruka" (Сообщение) в сайдбаре объявления
                     contact_clicked = False
-                    for method, arg in [
-                        ("text", "Poruka"),
-                        ("role", ("button", "Poruka")),
-                        ("selector", 'button:has-text("Poruka")'),
-                        ("selector", 'a:has-text("Poruka")'),
-                        ("selector", 'button:has-text("Kontaktiraj")'),
-                        ("selector", 'a:has-text("Kontaktiraj")'),
-                        ("selector", 'a[href*="poruke"]'),
-                        ("selector", 'a[href*="poruka"]'),
-                    ]:
-                        try:
-                            if method == "text":
-                                loc = page.get_by_text(arg, exact=True)
-                                if await loc.count() > 0:
-                                    await loc.first.click(force=True)
-                                    contact_clicked = True
-                                    break
-                            elif method == "role":
-                                loc = page.get_by_role("button", name=arg[1])
-                                if await loc.count() > 0:
-                                    await loc.first.click(force=True)
-                                    contact_clicked = True
-                                    break
-                            else:
-                                btn = await page.query_selector(arg)
-                                if btn and await btn.is_visible():
-                                    await btn.click(force=True)
-                                    contact_clicked = True
-                                    break
-                        except Exception:
-                            continue
+                    for attempt in range(2):
+                        for method, arg in [
+                            ("text", "Poruka"),
+                            ("role", ("button", "Poruka")),
+                            ("selector", 'button:has-text("Poruka")'),
+                            ("selector", 'a:has-text("Poruka")'),
+                            ("selector", 'button:has-text("Kontaktiraj")'),
+                            ("selector", 'a:has-text("Kontaktiraj")'),
+                            ("selector", 'a[href*="poruke"]'),
+                            ("selector", 'a[href*="poruka"]'),
+                        ]:
+                            try:
+                                if method == "text":
+                                    loc = page.get_by_text(arg, exact=True)
+                                    if await loc.count() > 0:
+                                        await loc.first.click(force=True, timeout=15000)
+                                        contact_clicked = True
+                                        break
+                                elif method == "role":
+                                    loc = page.get_by_role("button", name=arg[1])
+                                    if await loc.count() > 0:
+                                        await loc.first.click(force=True, timeout=15000)
+                                        contact_clicked = True
+                                        break
+                                else:
+                                    btn = await page.query_selector(arg)
+                                    if btn and await btn.is_visible():
+                                        await btn.click(force=True, timeout=15000)
+                                        contact_clicked = True
+                                        break
+                            except Exception as e:
+                                if "intercepts" in str(e).lower() or "qc-cmp" in str(e).lower():
+                                    await self._accept_consent_dialog(page)
+                                    await asyncio.sleep(0.2)
+                                continue
+                        if contact_clicked:
+                            break
+                        if attempt == 0:
+                            await self._accept_consent_dialog(page)
+                            await asyncio.sleep(0.3)
                     
                     if not contact_clicked:
                         raise Exception("Не найдена кнопка Poruka")
                     
                     # Шаг 2: Ожидание появления формы сообщения (модал или новая страница)
                     self._log("Ожидание формы сообщения...")
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.25)
                     
                     # Ждём навигации, если переход на страницу сообщений
                     try:
                         await page.wait_for_url(re.compile(r"poruke|poruka"), timeout=8000)
-                        await asyncio.sleep(0.6)
+                        await asyncio.sleep(0.15)
                     except Exception:
                         pass
                     
@@ -831,7 +905,7 @@ class OLXSender:
                                 el.dispatchEvent(new Event('input', { bubbles: true }));
                                 el.dispatchEvent(new Event('change', { bubbles: true }));
                             }""", text_to_send)
-                        await asyncio.sleep(0.25)
+                        await asyncio.sleep(0.2)
                         for method, arg in [
                             ("selector", '#modals-container button:has-text("Pošalji poruku")'),
                             ("selector", '#modals-container button:has-text("Pošalji")'),
@@ -864,11 +938,20 @@ class OLXSender:
                                 continue
                         return False
                     
-                    # Первое сообщение — текст из меню
+                    # Первое сообщение — текст из меню (с повтором при неудаче)
                     self._log("Заполнение текста сообщения...")
-                    sent = await _fill_and_send(msg_input, task.message)
+                    sent = False
+                    for attempt in range(3):
+                        sent = await _fill_and_send(msg_input, task.message)
+                        if sent:
+                            break
+                        await asyncio.sleep(0.2)
+                        if attempt < 2:
+                            msg_input = await page.query_selector('textarea[placeholder*="poruk"], textarea, [contenteditable="true"][role="textbox"]')
+                            if not msg_input:
+                                break
                     if not sent:
-                        await asyncio.sleep(0.3)
+                        await asyncio.sleep(0.15)
                         try:
                             await page.keyboard.press("Enter")
                             sent = True
@@ -876,15 +959,15 @@ class OLXSender:
                             pass
                     if not sent:
                         raise Exception("Не найдена кнопка Pošalji poruku")
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.25)
                     self._log(f"✓ Сообщение отправлено продавцу: {short_url}")
                     
                     # Второе сообщение — ссылка (если есть). Возвращаемся на страницу объявления
                     if task.message_link:
-                        await asyncio.sleep(0.4)
+                        await asyncio.sleep(0.2)
                         self._log("Возврат на страницу объявления для отправки ссылки...")
                         await page.goto(task.listing_url, wait_until="domcontentloaded", timeout=30000)
-                        await asyncio.sleep(random.uniform(0.3, 0.5))
+                        await asyncio.sleep(random.uniform(0.15, 0.25))
                         await self._accept_consent_dialog(page)
                         await asyncio.sleep(0.1)
                         self._log("Поиск кнопки Poruka для второго сообщения...")
@@ -918,10 +1001,10 @@ class OLXSender:
                             except Exception:
                                 continue
                         if contact_clicked2:
-                            await asyncio.sleep(0.6)
+                            await asyncio.sleep(0.15)
                             try:
                                 await page.wait_for_url(re.compile(r"poruke|poruka"), timeout=6000)
-                                await asyncio.sleep(0.4)
+                                await asyncio.sleep(0.2)
                             except Exception:
                                 pass
                             msg_input2 = None
@@ -946,7 +1029,7 @@ class OLXSender:
                             if msg_input2:
                                 self._log("Отправка ссылки вторым сообщением...")
                                 if await _fill_and_send(msg_input2, task.message_link):
-                                    await asyncio.sleep(0.4)
+                                    await asyncio.sleep(0.2)
                                     self._log("✓ Ссылка отправлена")
                     await asyncio.sleep(0.3)
                     await self._take_chat_screenshot(page, task, on_screenshot)
@@ -1007,6 +1090,7 @@ class OLXSender:
         on_status: Optional[Callable] = None,
         on_screenshot: Optional[Callable[[bytes, str], Awaitable[None]]] = None,
         on_login_failed: Optional[Callable[[dict], None]] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
         create_link_fn: Optional[Callable] = None,
     ) -> bool:
         """Выполнить одну сессию: контекст с прокси, вход, отправка"""
@@ -1021,6 +1105,8 @@ class OLXSender:
                 if on_login_failed:
                     on_login_failed(account)
                 return False
+            if on_proxy_used and proxy_str:
+                on_proxy_used(proxy_str)
             self._log("✓ Вход выполнен успешно")
             await self.run_tasks(tasks, on_status=on_status, on_screenshot=on_screenshot, context=job_ctx, create_link_fn=create_link_fn)
             return True
@@ -1033,11 +1119,12 @@ class OLXSender:
         on_status: Optional[Callable] = None,
         on_screenshot: Optional[Callable[[bytes, str], Awaitable[None]]] = None,
         on_login_failed: Optional[Callable[[dict], None]] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
         create_link_fn: Optional[Callable] = None,
     ):
         """Запуск нескольких сессий одновременно (параллельно)"""
         coros = [
-            self.run_single_job(acc, proxy_str, tasks, on_status, on_screenshot, on_login_failed, create_link_fn)
+            self.run_single_job(acc, proxy_str, tasks, on_status, on_screenshot, on_login_failed, on_proxy_used, create_link_fn)
             for acc, proxy_str, tasks in jobs
         ]
         await asyncio.gather(*coros)

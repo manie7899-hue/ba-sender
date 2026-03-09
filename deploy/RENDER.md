@@ -36,6 +36,7 @@ Dashboard → New → **Background Worker** → подключите `manie7899-
 | `BOT_TOKEN` | токен от @BotFather | ✅ Да |
 | `ADMIN_CHAT_ID` | ID чата для заявок | Нет |
 | `BOT_DATA_PATH` | `/data` (если добавлен диск) | Нет |
+| `MAX_CONCURRENT` | `3` (для 2 GB RAM, меньше нагрузка) | Нет |
 
 ## 5. Deploy
 

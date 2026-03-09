@@ -98,7 +98,7 @@ def fetch_listing_data(listing_url: str, proxy: Optional[str] = None) -> tuple[O
             if image_url and not image_url.startswith(("http://", "https://")):
                 image_url = "https:" + image_url if image_url.startswith("//") else None
 
-        # Цена: og:description " - 1.500 KM" или " - Na upit"
+        # Цена: og:description " - 1.500 KM", " - 1.50 KM" или " - Na upit"
         m = re.search(r'<meta\s+[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
         if m:
             desc = m.group(1).strip()
@@ -106,12 +106,21 @@ def fetch_listing_data(listing_url: str, proxy: Optional[str] = None) -> tuple[O
             if len(parts) == 2:
                 price = parts[1].strip()
         if not price:
-            m = re.search(r'"price"\s*:\s*(\d+)', html)
+            m = re.search(r'"price"\s*:\s*([\d.,]+)', html)
             if m:
-                pval = int(m.group(1))
-                price = "Na upit" if pval == 0 else f"{pval:,}".replace(",", ".") + " KM"
+                try:
+                    s = m.group(1).replace(",", ".")
+                    pval = float(s)
+                    if pval == 0:
+                        price = "Na upit"
+                    elif pval == int(pval):
+                        price = f"{int(pval):,}".replace(",", ".") + " KM"
+                    else:
+                        price = f"{pval:.2f} KM"
+                except (ValueError, TypeError):
+                    pass
         if not price:
-            m = re.search(r'(\d+[\s.]?\d*)\s*KM', html, re.I)
+            m = re.search(r'(\d+[\s.,]?\d*)\s*KM', html, re.I)
             if m:
                 price = m.group(0).strip()
 
