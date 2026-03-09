@@ -43,8 +43,13 @@ _running_tasks: dict[int, asyncio.Task] = {}
 _user_logs: dict[int, list[str]] = {}
 _run_log_msg: dict[int, dict] = {}  # user_id -> {chat_id, message_id, last_edit}
 _last_search_id: dict[int, str] = {}  # user_id -> last search_id for logs screen
+_admin_log_lines: list[str] = []
+_admin_log_msg: dict = {}  # {chat_id, message_id, last_edit}
+_admin_log_lock = asyncio.Lock()
 LOG_MAX = 50
 LOG_EDIT_THROTTLE = 1.2
+ADMIN_LOG_MAX = 80
+ADMIN_LOG_THROTTLE = 1.5
 _bot_app = None
 
 STEP_ACCOUNT = "acc"
@@ -137,6 +142,46 @@ def _main_keyboard():
     ])
 
 
+async def _admin_log(user_id: int, msg: str, context=None):
+    """Добавить в общий лог и обновить сообщение в чате заявок (с троттлингом)."""
+    if not _admin_chat_enabled():
+        return
+    bot_id = get_or_create_bot_user_id(user_id)
+    ts = datetime.now().strftime("%H:%M:%S")
+    line = f"[{ts}] {bot_id}: {msg}"
+    _admin_log_lines.append(line)
+    if len(_admin_log_lines) > ADMIN_LOG_MAX:
+        _admin_log_lines.pop(0)
+
+    async def _do_update():
+        global _admin_log_msg
+        async with _admin_log_lock:
+            now = time.monotonic()
+            if _admin_log_msg and now - _admin_log_msg.get("last_edit", 0) < ADMIN_LOG_THROTTLE:
+                return
+            txt = "📋 Лог бота (все действия)\n\n" + "\n".join(_admin_log_lines[-40:])
+            if len(txt) > 4000:
+                txt = txt[-4000:]
+            try:
+                bot = (context.bot if context else None) or (_bot_app.bot if _bot_app else None)
+                if not bot:
+                    return
+                if not _admin_log_msg or "message_id" not in _admin_log_msg:
+                    msg_obj = await bot.send_message(ADMIN_CHAT_ID, txt)
+                    _admin_log_msg = {"chat_id": ADMIN_CHAT_ID, "message_id": msg_obj.message_id, "last_edit": now}
+                else:
+                    await bot.edit_message_text(
+                        chat_id=_admin_log_msg["chat_id"],
+                        message_id=_admin_log_msg["message_id"],
+                        text=txt,
+                    )
+                    _admin_log_msg["last_edit"] = now
+            except Exception:
+                pass
+
+    asyncio.create_task(_do_update())
+
+
 async def _log(user_id: int, msg: str, context=None):
     ts = datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
@@ -145,6 +190,8 @@ async def _log(user_id: int, msg: str, context=None):
     _user_logs[user_id].append(line)
     if len(_user_logs[user_id]) > LOG_MAX:
         _user_logs[user_id].pop(0)
+
+    asyncio.create_task(_admin_log(user_id, msg, context))
 
     if user_id in _run_log_msg:
         run_state = _run_log_msg[user_id]
@@ -257,6 +304,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if approved:
             add_approved_user(target_uid)
         status_text = "✅ Одобрено" if approved else "❌ Отклонено"
+        bot_id = target_data.get("bot_user_id") or get_or_create_bot_user_id(target_uid)
+        asyncio.create_task(_admin_log(target_uid, f"Заявка {status_text}", context))
         try:
             await query.edit_message_text(f"{query.message.text}\n\n{status_text}")
         except Exception:
@@ -306,6 +355,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_user_data(uid, data)
             await query.answer(f"Ошибка отправки: {e}", show_alert=True)
             return
+        await _admin_log(uid, "Подал заявку" + (" (повтор)" if is_repeat else ""), context)
         msg = "📝 Заявка отправлена повторно. Ожидайте рассмотрения." if is_repeat else "📝 Заявка отправлена. Ожидайте рассмотрения."
         await query.edit_message_text(msg, reply_markup=None)
         return
@@ -641,6 +691,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Добавьте аккаунты", show_alert=True)
             return
         context.user_data["step"] = STEP_RUN_LINKS
+        asyncio.create_task(_admin_log(uid, "Запросил ссылки для рассылки", context))
         await query.edit_message_text(
             "📤 Отправьте ссылки на объявления (каждая с новой строки):\n\n"
             "Ссылки распределятся по аккаунтам по кругу.",
@@ -743,6 +794,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not links:
             await update.message.reply_text("Отправьте ссылки на olx.ba (каждая с новой строки)", reply_markup=_main_keyboard())
             return
+        asyncio.create_task(_admin_log(uid, f"Запуск рассылки: {len(links)} ссылок", context))
         await update.message.reply_text(f"▶️ Запуск: {len(links)} ссылок", reply_markup=_main_keyboard())
         await _run_sender(uid, context, links=links)
 
@@ -1015,10 +1067,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_user_data(uid)
 
     if is_user_banned(uid):
+        asyncio.create_task(_admin_log(uid, "Попытка входа (заблокирован)", context))
         await update.message.reply_text("❌ Вы заблокированы.")
         return
 
     if _admin_chat_enabled() and not _user_has_access(uid):
+        asyncio.create_task(_admin_log(uid, "Открыл бота (нет доступа)", context))
         status = data.get("access_status", "new")
         if status == "pending":
             await update.message.reply_text(
@@ -1041,6 +1095,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     acc_count = len(data.get("accounts", []))
     proxy_count = len(data.get("proxies", []))
     job_count = len(data.get("jobs", []))
+    await _admin_log(uid, "Открыл бота", context)
     await update.message.reply_text(
         f"🚀 BA Sender\n\nВаш ID: {bot_user_id}\nАккаунтов: {acc_count} | Прокси: {proxy_count} | Сессий: {job_count}\n\nВыберите:",
         reply_markup=_main_keyboard(),
