@@ -572,23 +572,22 @@ class OLXSender:
                         except Exception:
                             continue
                 if not chat_clicked:
-                    self._log("Поиск самого нового диалога (пропуск системных сообщений OLX)...")
-                    # Первый диалог с продавцом, НЕ системное сообщение OLX (пароль, уведомления и т.д.)
+                    self._log("Поиск диалога с продавцом (по ссылке на объявление)...")
+                    # Только чаты с продавцами: в превью есть ссылка olx.one/artikal — системные сообщения OLX её не имеют
                     clicked = await page.evaluate("""() => {
                         const links = Array.from(document.querySelectorAll('a[href*="/poruke/"], a[href*="/poruka/"]'));
-                        const listLinks = [];
+                        const sellerChats = [];
                         for (const a of links) {
                             const href = (a.getAttribute('href') || '').split('?')[0];
                             if (!/\\/poruke\\/\\d+|\\/poruka\\/\\d+/.test(href)) continue;
                             const inNav = a.closest('nav') || a.closest('header') || a.closest('[role="navigation"]');
                             if (inNav || a.offsetParent === null) continue;
                             const item = a.closest('[class*="chat"],[class*="item"],[class*="conversation"],[class*="thread"],[class*="list"]') || a.parentElement;
-                            const text = ((item ? item.textContent : '') + ' ' + (a.textContent || '')).toLowerCase();
-                            if (text.includes('naš sistem') || text.includes('poslane od strane') || text.includes('administracije') && text.includes('poruke')) continue;
-                            listLinks.push(a);
+                            const text = (item ? item.textContent : '') + ' ' + (a.textContent || '');
+                            if (/olx\\.one|artikal|https?:\\/\\//i.test(text)) sellerChats.push(a);
                         }
-                        if (listLinks.length > 0) {
-                            listLinks[0].click();
+                        if (sellerChats.length > 0) {
+                            sellerChats[0].click();
                             return true;
                         }
                         return false;
