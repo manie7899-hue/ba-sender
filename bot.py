@@ -225,17 +225,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data.get("access_status") == "approved":
             await query.edit_message_text("У вас уже есть доступ.", reply_markup=_main_keyboard())
             return
-        if data.get("access_status") == "pending":
-            await query.answer("Заявка уже на рассмотрении", show_alert=True)
-            return
+        is_repeat = data.get("access_status") == "pending"
         data["access_status"] = "pending"
         save_user_data(uid, data)
         user = update.effective_user
         bot_user_id = get_or_create_bot_user_id(uid)
         name = user.full_name or user.username or str(uid)
         username = f"@{user.username}" if user.username else ""
+        header = "📋 Повторная заявка на доступ\n\n" if is_repeat else "📋 Новая заявка на доступ\n\n"
         txt = (
-            f"📋 Новая заявка на доступ\n\n"
+            f"{header}"
             f"Bot ID: {bot_user_id}\n"
             f"Telegram ID: {uid}\n"
             f"Имя: {name}\n"
@@ -252,7 +251,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_user_data(uid, data)
             await query.answer(f"Ошибка отправки: {e}", show_alert=True)
             return
-        await query.edit_message_text("📝 Заявка отправлена. Ожидайте рассмотрения.", reply_markup=None)
+        msg = "📝 Заявка отправлена повторно. Ожидайте рассмотрения." if is_repeat else "📝 Заявка отправлена. Ожидайте рассмотрения."
+        await query.edit_message_text(msg, reply_markup=None)
         return
 
     # === ПРОВЕРКА ДОСТУПА ===
