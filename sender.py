@@ -3,8 +3,9 @@
 
 import asyncio
 import random
-import threading
 import re
+import threading
+import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
@@ -226,6 +227,7 @@ class OLXSender:
                 '--disable-dev-shm-usage',
                 '--disable-infobars',
                 '--window-size=1280,800',
+                '--lang=bs-BA',
             ]
             self._browser = await self._playwright.chromium.launch(
                 headless=headless,
@@ -254,6 +256,22 @@ class OLXSender:
         }, 500);
     """
 
+    async def _wait_for_cloudflare_pass(self, page, max_wait: float = 15.0) -> bool:
+        """Ждать прохождения Cloudflare проверки. Возвращает False если застряли на Cloudflare."""
+        start = time.monotonic()
+        while (time.monotonic() - start) < max_wait:
+            try:
+                content = (await page.content()).lower()
+                if "performing security verification" in content or ("cloudflare" in content and "ray id" in content):
+                    await asyncio.sleep(1.5)
+                    continue
+                if "olx" in page.url.lower() or "artikal" in page.url or "poruke" in page.url or "login" in page.url:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        return False
+
     async def _create_context_with_proxy(self, proxy_str: Optional[str]):
         """Создать контекст с указанным прокси (для мультиаккаунта)"""
         proxy_config = parse_proxy(proxy_str) if proxy_str and proxy_str.strip() else None
@@ -275,7 +293,9 @@ class OLXSender:
         try:
             page = await ctx.new_page()
             await page.goto(OLX_LOGIN_URL, wait_until="domcontentloaded", timeout=25000)
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.5)
+            if not await self._wait_for_cloudflare_pass(page, max_wait=18):
+                raise Exception("Cloudflare блокирует доступ. Попробуйте другой прокси или подождите.")
             await self._accept_consent_dialog(page)
             await asyncio.sleep(0.2)
             
@@ -540,6 +560,10 @@ class OLXSender:
             return True
         try:
             url = page.url
+            content = (await page.content()).lower()
+            if "performing security verification" in content or ("cloudflare" in content and "ray id" in content):
+                self._log("⚠ Cloudflare — сообщение возможно не отправлено")
+                return False
             chat_clicked = False
             if re.search(r"/poruke/\d+|/poruka/\d+", url):
                 await asyncio.sleep(0.4)
@@ -748,6 +772,8 @@ class OLXSender:
                     short_url = task.listing_url[:60] + "..." if len(task.listing_url) > 60 else task.listing_url
                     await page.goto(task.listing_url, wait_until="domcontentloaded", timeout=25000)
                     await asyncio.sleep(0.6)
+                    if not await self._wait_for_cloudflare_pass(page, max_wait=18):
+                        raise Exception("Cloudflare блокирует. Смените прокси.")
                     await self._accept_consent_dialog(page)
                     await asyncio.sleep(0.2)
                     # Извлекаем никнейм продавца — ТОЛЬКО из блока с кнопкой Poruka (карточка продавца)
@@ -830,6 +856,9 @@ class OLXSender:
                         await asyncio.sleep(0.3)
                     
                     if not contact_clicked:
+                        content = (await page.content()).lower()
+                        if "cloudflare" in content and "ray id" in content:
+                            raise Exception("Cloudflare блокирует. Смените прокси.")
                         raise Exception("Не найдена кнопка Poruka")
                     
                     # Шаг 2: Ожидание появления формы сообщения (модал или новая страница)
@@ -1032,7 +1061,11 @@ class OLXSender:
                                     await asyncio.sleep(0.1)
                                     self._log("✓ Ссылка")
                     await asyncio.sleep(0.15)
-                    await self._take_chat_screenshot(page, task, on_screenshot)
+                    screenshot_ok = await self._take_chat_screenshot(page, task, on_screenshot)
+                    if not screenshot_ok:
+                        if on_status:
+                            on_status(task.id, "error", "Cloudflare — сообщение не отправлено")
+                        return False
                     # Добавляем в ЧС только валидные никнеймы (не ID, не служебные)
                     if task.seller_username and not task.seller_username.isdigit() and len(task.seller_username) >= 3:
                         add_seller_to_blacklist(task.seller_username)
