@@ -1054,19 +1054,34 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
     proxies_to_remove = []  # заполняется только при успешном входе (on_proxy_used)
 
     if resume_state:
-        # Режим продолжения: оставшиеся ссылки (в т.ч. от невалидных аккаунтов) распределяем по текущим валидным
+        # Режим продолжения: фильтруем уже отправленные; ссылки от удалённых (невалидных) аккаунтов — переназначаем
         links = resume_state.get("links", [])
+        account_emails = resume_state.get("account_emails", [])
         completed_list = resume_state.get("completed", [])
-        completed_urls = {c[1] for c in completed_list if len(c) >= 2}
-        remaining_links = [url for url in links if url not in completed_urls]
-        n = len(accounts) or 1
-        for i, acc in enumerate(accounts):
-            acc_links = [remaining_links[j] for j in range(i, len(remaining_links), n)]
-            if acc_links:
+        completed_set = {(c[0], c[1]) for c in completed_list if len(c) >= 2}
+        acc_map = {a.get("email"): a for a in accounts}
+        n = len(account_emails) or 1
+        orphaned_links = []  # ссылки от удалённых/невалидных аккаунтов — переназначим другим
+        for i, em in enumerate(account_emails):
+            acc = acc_map.get(em)
+            pending = [links[j] for j in range(i, len(links), n) if (em, links[j]) not in completed_set]
+            if not acc:
+                orphaned_links.extend(pending)
+                continue
+            if pending:
                 proxy_str = proxies.pop(0).strip() if proxies else None
-                jobs.append((acc, proxy_str, acc_links))
+                jobs.append((acc, proxy_str, pending))
+        # Распределяем orphaned_links (от удалённых аккаунтов) по оставшимся
+        orphaned_count = 0
+        if orphaned_links and jobs:
+            for idx, (acc, proxy_str, acc_links) in enumerate(jobs):
+                extra = [orphaned_links[j] for j in range(idx, len(orphaned_links), len(jobs))]
+                if extra:
+                    jobs[idx] = (acc, proxy_str, acc_links + extra)
+            orphaned_count = len(orphaned_links)
         run_state = dict(resume_state)
-        run_state["account_emails"] = [a.get("email", "?") for a in accounts]
+        if orphaned_count:
+            run_state["_orphaned_count"] = orphaned_count
     elif links:
         # Режим: ссылки при запуске, ротация по аккаунтам
         clear_run_state(user_id)
@@ -1197,6 +1212,9 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
                     task_id_to_url[t.id] = t.listing_url
                 built_jobs.append((acc, proxy_str, tasks))
             if run_state:
+                orphaned = run_state.pop("_orphaned_count", 0)
+                if orphaned:
+                    on_log(f"↻ Переназначено {orphaned} ссылок с удалённых аккаунтов")
                 save_run_state(user_id, run_state)
 
             def create_link_for_task(task):
