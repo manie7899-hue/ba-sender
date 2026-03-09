@@ -19,6 +19,7 @@ class SendTask:
     listing_url: str
     message: str
     message_link: Optional[str] = None  # второе сообщение (ссылка RedScript)
+    seller_username: Optional[str] = None  # никнейм продавца для поиска чата при скриншоте
     status: str = "pending"  # pending, running, success, error
     error: Optional[str] = None
     created_at: float = 0
@@ -515,40 +516,67 @@ class OLXSender:
                 await asyncio.sleep(0.5)
 
             if not chat_clicked:
-                self._log("Поиск самого нового диалога с продавцом...")
-                clicked = await page.evaluate("""() => {
-                    const links = Array.from(document.querySelectorAll('a[href*="/poruke/"], a[href*="/poruka/"]'));
-                    for (const a of links) {
-                        const href = (a.getAttribute('href') || '').split('?')[0];
-                        if (/\\/poruke\\/\\d+|\\/poruka\\/\\d+/.test(href)) {
-                            const inNav = a.closest('nav') || a.closest('header') || a.closest('[role="navigation"]');
-                            if (!inNav && a.offsetParent !== null) {
-                                a.click();
-                                return true;
-                            }
-                        }
-                    }
-                    return false;
-                }""")
-                if clicked:
-                    chat_clicked = True
-                    self._log("Открыт самый новый диалог")
-                    await asyncio.sleep(1.2)
-                if not chat_clicked:
+                seller = (task.seller_username or "").strip().lower()
+                if seller:
+                    self._log(f"Поиск чата с продавцом {task.seller_username}...")
+                    # Ищем ссылку/элемент, содержащий никнейм продавца
                     all_links = await page.query_selector_all('a[href*="/poruke/"], a[href*="/poruka/"]')
                     for el in all_links:
                         try:
                             href = await el.get_attribute("href") or ""
-                            if re.search(r"/poruke/\d+|/poruka/\d+", href):
-                                in_nav = await el.evaluate("""el => !!(el.closest('nav') || el.closest('header'))""")
-                                if not in_nav and await el.is_visible():
-                                    await el.click(force=True)
-                                    chat_clicked = True
-                                    self._log("Открыт диалог с продавцом")
-                                    await asyncio.sleep(1.2)
-                                    break
+                            if not re.search(r"/poruke/\d+|/poruka/\d+", href):
+                                continue
+                            in_nav = await el.evaluate("""el => !!(el.closest('nav') || el.closest('header'))""")
+                            if in_nav:
+                                continue
+                            # Проверяем, есть ли никнейм в тексте элемента или родителя (имя в чате)
+                            text = await el.evaluate("""el => {
+                                const p = el.closest('[class*="chat"], [class*="conversation"], [class*="item"]') || el.parentElement;
+                                return (p ? p.textContent : '') + (el.textContent || '');
+                            }""")
+                            if text and seller in (text or "").lower():
+                                await el.click(force=True)
+                                chat_clicked = True
+                                self._log(f"Открыт чат с {task.seller_username}")
+                                await asyncio.sleep(1.2)
+                                break
                         except Exception:
                             continue
+                if not chat_clicked:
+                    self._log("Поиск самого нового диалога...")
+                    clicked = await page.evaluate("""() => {
+                        const links = Array.from(document.querySelectorAll('a[href*="/poruke/"], a[href*="/poruka/"]'));
+                        for (const a of links) {
+                            const href = (a.getAttribute('href') || '').split('?')[0];
+                            if (/\\/poruke\\/\\d+|\\/poruka\\/\\d+/.test(href)) {
+                                const inNav = a.closest('nav') || a.closest('header') || a.closest('[role="navigation"]');
+                                if (!inNav && a.offsetParent !== null) {
+                                    a.click();
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    }""")
+                    if clicked:
+                        chat_clicked = True
+                        self._log("Открыт самый новый диалог")
+                        await asyncio.sleep(1.2)
+                    if not chat_clicked:
+                        all_links = await page.query_selector_all('a[href*="/poruke/"], a[href*="/poruka/"]')
+                        for el in all_links:
+                            try:
+                                href = await el.get_attribute("href") or ""
+                                if re.search(r"/poruke/\d+|/poruka/\d+", href):
+                                    in_nav = await el.evaluate("""el => !!(el.closest('nav') || el.closest('header'))""")
+                                    if not in_nav and await el.is_visible():
+                                        await el.click(force=True)
+                                        chat_clicked = True
+                                        self._log("Открыт диалог с продавцом")
+                                        await asyncio.sleep(1.2)
+                                        break
+                            except Exception:
+                                continue
 
                 if not chat_clicked:
                     for sel in [
@@ -612,6 +640,17 @@ class OLXSender:
                     await asyncio.sleep(random.uniform(0.2, 0.4))
                     await self._accept_consent_dialog(page)
                     await asyncio.sleep(0.1)
+                    # Извлекаем никнейм продавца для скриншота (ссылка /profil/username)
+                    try:
+                        for a in await page.query_selector_all('a[href*="/profil/"]'):
+                            href = await a.get_attribute("href") or ""
+                            m = re.search(r"/profil/([^/?]+)", href)
+                            if m and m.group(1) not in ("aktivni", "zavrseni", "dojmovi"):
+                                task.seller_username = m.group(1)
+                                self._log(f"Продавец: {task.seller_username}")
+                                break
+                    except Exception:
+                        pass
                     self._log("Поиск кнопки Poruka...")
                     
                     # Шаг 1: Нажать кнопку "Poruka" (Сообщение) в сайдбаре объявления
