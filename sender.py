@@ -695,9 +695,11 @@ class OLXSender:
                     await asyncio.sleep(0.3)
                     
                     async def _fill_and_send(input_el, text_to_send: str) -> bool:
-                        """Заполнить поле и отправить сообщение"""
+                        """Заполнить поле и отправить сообщение (с сохранением переносов строк)"""
                         if not input_el:
                             return False
+                        # Нормализуем переносы: \r\n -> \n
+                        text_to_send = text_to_send.replace("\r\n", "\n").replace("\r", "\n")
                         try:
                             await input_el.click()
                             await asyncio.sleep(0.15)
@@ -705,17 +707,23 @@ class OLXSender:
                             pass
                         is_ce = await input_el.evaluate("el => el.getAttribute('contenteditable') === 'true'")
                         if is_ce:
-                            await input_el.evaluate("""(el, text) => {
+                            # contenteditable: insertText не сохраняет \n — вставляем построчно с insertLineBreak
+                            lines = text_to_send.split("\n")
+                            await input_el.evaluate("""(el, lines) => {
                                 el.focus();
                                 const r = document.createRange();
                                 r.selectNodeContents(el);
                                 const s = window.getSelection();
                                 s.removeAllRanges();
                                 s.addRange(r);
-                                document.execCommand('insertText', false, text);
-                                el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-                            }""", text_to_send)
+                                for (let i = 0; i < lines.length; i++) {
+                                    document.execCommand('insertText', false, lines[i]);
+                                    if (i < lines.length - 1) document.execCommand('insertLineBreak');
+                                }
+                                el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+                            }""", lines)
                         else:
+                            # textarea: value сохраняет \n
                             await input_el.evaluate("""(el, text) => {
                                 el.value = text;
                                 el.dispatchEvent(new Event('input', { bubbles: true }));
