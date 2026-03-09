@@ -1020,7 +1020,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=None, links: list = None):
     data = load_user_data(user_id)
     message = data.get("message", "Zdravo!")
-    dmin, dmax = data.get("delay_min", 2), data.get("delay_max", 3)
+    dmin, dmax = data.get("delay_min", 1), data.get("delay_max", 2)
     tg_key = data.get("telegram_api_key", "")
     tg_enabled = data.get("telegram_api_enabled", False)
     tg_proxy = data.get("telegram_api_proxy", "").strip() or None
