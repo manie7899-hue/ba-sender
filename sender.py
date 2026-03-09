@@ -1090,6 +1090,8 @@ class OLXSender:
                 delay = random.uniform(self.delay_min, self.delay_max)
                 await asyncio.sleep(delay)
 
+    JOB_TIMEOUT_SEC = 180  # таймаут на один аккаунт (вход + отправка), чтобы не зависать
+
     async def run_single_job(
         self,
         account: dict,
@@ -1125,6 +1127,9 @@ class OLXSender:
             self._log(f"✓ {account_email} вошёл")
             await self.run_tasks(tasks, on_status=_wrapped_on_status, on_screenshot=on_screenshot, context=job_ctx, create_link_fn=create_link_fn)
             return True
+        except Exception as e:
+            self._log(f"⚠ {account_email}: {str(e)[:120]}")
+            raise
         finally:
             await job_ctx.close()
 
@@ -1138,12 +1143,18 @@ class OLXSender:
         create_link_fn: Optional[Callable] = None,
     ):
         """Запуск нескольких сессий параллельно. Ошибка в одном аккаунте не останавливает остальные."""
-        coros = [
-            self.run_single_job(acc, proxy_str, tasks, on_status, on_screenshot, on_login_failed, on_proxy_used, create_link_fn)
-            for acc, proxy_str, tasks in jobs
-        ]
+        async def _run_with_timeout(acc, proxy_str, tasks):
+            try:
+                return await asyncio.wait_for(
+                    self.run_single_job(acc, proxy_str, tasks, on_status, on_screenshot, on_login_failed, on_proxy_used, create_link_fn),
+                    timeout=self.JOB_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                raise TimeoutError(f"Таймаут ({self.JOB_TIMEOUT_SEC} сек) — аккаунт завис")
+        coros = [_run_with_timeout(acc, proxy_str, tasks) for acc, proxy_str, tasks in jobs]
         results = await asyncio.gather(*coros, return_exceptions=True)
         for i, r in enumerate(results):
             if isinstance(r, BaseException):
                 acc_email = jobs[i][0].get("email", "?") if i < len(jobs) else "?"
-                self._log(f"⚠ {acc_email}: {str(r)[:80]}...")
+                err_msg = str(r)[:150]
+                self._log(f"⚠ {acc_email}: {err_msg}")

@@ -1262,7 +1262,10 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
         except asyncio.CancelledError:
             on_log("⏹ Остановлено")
         except Exception as e:
-            on_log(f"❌ Ошибка: {e}")
+            err = str(e)
+            on_log(f"❌ Рассылка прервана: {err[:200]}")
+            if run_state:
+                on_log("▶️ Нажмите «Продолжить рассылку» для возобновления")
         finally:
             await _run_log_final_update(user_id, context)
             _running_tasks.pop(user_id, None)
