@@ -1113,6 +1113,21 @@ async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Пользователь {arg} (ID: {target_id}) разблокирован.")
 
 
+async def chs_remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /chs_remove — только в чате панели. Удалить из ЧС: /chs_remove Krivaja191919"""
+    if update.effective_chat.id != ADMIN_CHAT_ID or not _admin_chat_enabled():
+        return
+    args = (context.args or [])
+    if not args:
+        await update.message.reply_text("Использование: /chs_remove <username>\nПример: /chs_remove Krivaja191919")
+        return
+    username = args[0].strip()
+    if remove_seller_from_blacklist(username):
+        await update.message.reply_text(f"✅ {username} удалён из чёрного списка")
+    else:
+        await update.message.reply_text(f"⚠️ {username} не найден в ЧС или уже удалён")
+
+
 async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /panel — только в чате панели. Показать заявки на рассмотрении."""
     if update.effective_chat.id != ADMIN_CHAT_ID or not _admin_chat_enabled():
