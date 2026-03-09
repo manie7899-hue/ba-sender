@@ -11,6 +11,12 @@ from playwright.async_api import async_playwright, Browser, BrowserContext
 
 from config import OLX_LOGIN_URL, OLX_PROFILE_URL, OLX_MESSAGES_URL, BLOCKED_KEYWORDS, INVALID_CREDENTIALS_KEYWORDS
 
+try:
+    from bot_storage import is_seller_blacklisted, add_seller_to_blacklist
+except ImportError:
+    is_seller_blacklisted = lambda x: False
+    add_seller_to_blacklist = lambda x: False
+
 
 @dataclass
 class SendTask:
@@ -640,7 +646,7 @@ class OLXSender:
                     await asyncio.sleep(random.uniform(0.2, 0.4))
                     await self._accept_consent_dialog(page)
                     await asyncio.sleep(0.1)
-                    # Извлекаем никнейм продавца для скриншота (ссылка /profil/username)
+                    # Извлекаем никнейм продавца (ссылка /profil/username)
                     try:
                         for a in await page.query_selector_all('a[href*="/profil/"]'):
                             href = await a.get_attribute("href") or ""
@@ -651,6 +657,12 @@ class OLXSender:
                                 break
                     except Exception:
                         pass
+                    # Проверка чёрного списка (глобальный для всех пользователей)
+                    if task.seller_username and is_seller_blacklisted(task.seller_username):
+                        self._log(f"⏭ Пропуск: {task.seller_username} в чёрном списке")
+                        if on_status:
+                            on_status(task.id, "skipped", "blacklist")
+                        return False
                     self._log("Поиск кнопки Poruka...")
                     
                     # Шаг 1: Нажать кнопку "Poruka" (Сообщение) в сайдбаре объявления
@@ -887,6 +899,8 @@ class OLXSender:
                                     self._log("✓ Ссылка отправлена")
                     await asyncio.sleep(0.3)
                     await self._take_chat_screenshot(page, task, on_screenshot)
+                    if task.seller_username:
+                        add_seller_to_blacklist(task.seller_username)
                     if on_status:
                         on_status(task.id, "success", None)
                     return True

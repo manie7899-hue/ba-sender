@@ -6,6 +6,7 @@ BA Sender — Telegram-бот (кнопки, пошагово, редактир�
 import asyncio
 import logging
 import os
+import random
 import time
 import uuid
 from datetime import datetime
@@ -15,7 +16,11 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
-from bot_storage import load_user_data, save_user_data, list_pending_users, get_or_create_bot_user_id, get_next_search_id
+from bot_storage import (
+    load_user_data, save_user_data, list_pending_users,
+    get_or_create_bot_user_id, get_next_search_id,
+    is_seller_blacklisted, add_seller_to_blacklist,
+)
 from sender import OLXSender, SendTask
 from telegram_api import create_telegram_link, fetch_listing_data
 
@@ -51,6 +56,8 @@ STEP_SESS_PROXY_EDIT = "sess_ped"  # редактирование прокси �
 STEP_SESS_ADD_LINKS = "sess_ln"    # добавление ссылок к сессии
 STEP_RUN_LINKS = "run_links"       # запрос ссылок при запуске
 STEP_ACC_MASS = "acc_mass"         # массовое добавление аккаунтов
+STEP_PROXY_ADD = "proxy_add"       # добавление прокси
+STEP_PROXY_MASS = "proxy_mass"     # массовое добавление прокси
 
 
 def _parse_links(text: str) -> list[str]:
@@ -65,17 +72,26 @@ def _parse_links(text: str) -> list[str]:
 
 
 def _parse_accounts(text: str) -> list[dict]:
-    """Парсинг массового добавления: email:password или email:password:proxy"""
+    """Парсинг массового добавления: email:password"""
     result = []
     for line in text.strip().split("\n"):
         line = line.strip()
         if not line or ":" not in line or "@" not in line:
             continue
-        parts = line.split(":", 2)
+        parts = line.split(":", 1)
         email, password = parts[0].strip(), parts[1]
-        proxy = parts[2].strip() if len(parts) > 2 else ""
         if email and password:
-            result.append({"email": email, "password": password, "proxy": proxy, "status": "unknown"})
+            result.append({"email": email, "password": password, "status": "unknown"})
+    return result
+
+
+def _parse_proxies(text: str) -> list[str]:
+    """Парсинг прокси: каждая строка — один прокси (ip:port:user:pass или ip:port)"""
+    result = []
+    for line in text.strip().split("\n"):
+        line = line.strip()
+        if line and line != "-":
+            result.append(line)
     return result
 
 
@@ -95,7 +111,7 @@ def _user_has_access(uid: int) -> bool:
     data = load_user_data(uid)
     if data.get("access_status") == "approved":
         return True
-    if data.get("access_status") in (None, "new") and (data.get("accounts") or data.get("jobs")):
+    if data.get("access_status") in (None, "new") and (data.get("accounts") or data.get("jobs") or data.get("proxies")):
         return True
     return False
 
@@ -106,8 +122,9 @@ def _kb_request_access():
 
 def _main_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👤 Аккаунты", callback_data="m_acc"), InlineKeyboardButton("📋 Сессии", callback_data="m_sess")],
-        [InlineKeyboardButton("✉️ Сообщение", callback_data="m_msg"), InlineKeyboardButton("📱 RedScript", callback_data="m_rs")],
+        [InlineKeyboardButton("👤 Аккаунты", callback_data="m_acc"), InlineKeyboardButton("🌐 Прокси", callback_data="m_proxy")],
+        [InlineKeyboardButton("📋 Сессии", callback_data="m_sess"), InlineKeyboardButton("✉️ Сообщение", callback_data="m_msg")],
+        [InlineKeyboardButton("📱 RedScript", callback_data="m_rs")],
         [InlineKeyboardButton("▶️ Запустить", callback_data="run"), InlineKeyboardButton("⏹ Стоп", callback_data="stop")],
         [InlineKeyboardButton("📋 Логи", callback_data="logs")],
     ])
@@ -191,8 +208,9 @@ async def _show_screen(bot, chat_id: int, screen: str, context: ContextTypes.DEF
     data = load_user_data(chat_id)
     if screen == "main":
         acc_count = len(data.get("accounts", []))
+        proxy_count = len(data.get("proxies", []))
         job_count = len(data.get("jobs", []))
-        txt = f"🚀 BA Sender\n\nАккаунтов: {acc_count} | Сессий: {job_count}\n\nВыберите:"
+        txt = f"🚀 BA Sender\n\nАккаунтов: {acc_count} | Прокси: {proxy_count} | Сессий: {job_count}\n\nВыберите:"
         await bot.edit_message_text(chat_id=chat_id, message_id=context._chat_data.get("msg_id"), text=txt, reply_markup=_main_keyboard())
         return
     # Для edit_message_text нужен message_id - мы вызываем из callback, там есть query
@@ -297,8 +315,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target == "back":
             bot_id = get_or_create_bot_user_id(uid)
             acc_count = len(data.get("accounts", []))
+            proxy_count = len(data.get("proxies", []))
             job_count = len(data.get("jobs", []))
-            txt = f"🚀 BA Sender\n\nВаш ID: {bot_id}\nАккаунтов: {acc_count} | Сессий: {job_count}\n\nВыберите:"
+            txt = f"🚀 BA Sender\n\nВаш ID: {bot_id}\nАккаунтов: {acc_count} | Прокси: {proxy_count} | Сессий: {job_count}\n\nВыберите:"
             kb = _main_keyboard()
         elif target == "m_acc":
             accs = data.get("accounts", [])
@@ -322,6 +341,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 kb.append([InlineKeyboardButton("✏️ Изменить", callback_data="sess_edit"), InlineKeyboardButton("🗑 Удалить", callback_data="sess_del")])
             kb.append([InlineKeyboardButton("◀ Назад", callback_data="nav_back")])
             kb = InlineKeyboardMarkup(kb)
+        elif target == "m_proxy":
+            proxies = data.get("proxies", [])
+            lines = [f"{i+1}. {p[:40]}..." if len(p) > 40 else f"{i+1}. {p}" for i, p in enumerate(proxies)]
+            txt = "🌐 Прокси\n\n" + ("\n".join(lines) if lines else "Нет прокси.")
+            kb = [[InlineKeyboardButton("➕ Добавить", callback_data="proxy_add"), InlineKeyboardButton("📦 Массово", callback_data="proxy_mass")]]
+            if proxies:
+                kb.append([InlineKeyboardButton("🗑 Удалить", callback_data="proxy_del")])
+            kb.append([InlineKeyboardButton("◀ Назад", callback_data="nav_back")])
+            kb = InlineKeyboardMarkup(kb)
         elif target == "m_rs":
             enabled = data.get("telegram_api_enabled", False)
             key = data.get("telegram_api_key", "")
@@ -334,8 +362,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             bot_id = get_or_create_bot_user_id(uid)
             acc_count = len(data.get("accounts", []))
+            proxy_count = len(data.get("proxies", []))
             job_count = len(data.get("jobs", []))
-            txt = f"🚀 BA Sender\n\nВаш ID: {bot_id}\nАккаунтов: {acc_count} | Сессий: {job_count}\n\nВыберите:"
+            txt = f"🚀 BA Sender\n\nВаш ID: {bot_id}\nАккаунтов: {acc_count} | Прокси: {proxy_count} | Сессий: {job_count}\n\nВыберите:"
             kb = _main_keyboard()
         await query.edit_message_text(txt, reply_markup=kb)
         return
@@ -405,6 +434,49 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["jobs"] = [j for j in data.get("jobs", []) if j.get("account_email") != email]
             save_user_data(uid, data)
         await query.edit_message_text("✅ Удалено", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ К аккаунтам", callback_data="nav_m_acc")]]))
+
+    # === ПРОКСИ ===
+    elif d == "m_proxy":
+        proxies = data.get("proxies", [])
+        lines = [f"{i+1}. {p[:40]}..." if len(p) > 40 else f"{i+1}. {p}" for i, p in enumerate(proxies)]
+        txt = "🌐 Прокси\n\n" + ("\n".join(lines) if lines else "Нет прокси. Используются вперемешку с аккаунтами.")
+        kb = [[InlineKeyboardButton("➕ Добавить", callback_data="proxy_add"), InlineKeyboardButton("📦 Массово", callback_data="proxy_mass")]]
+        if proxies:
+            kb.append([InlineKeyboardButton("🗑 Удалить", callback_data="proxy_del")])
+        kb.append([InlineKeyboardButton("◀ Назад", callback_data="nav_back")])
+        await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb))
+
+    elif d == "proxy_add":
+        context.user_data["step"] = STEP_PROXY_ADD
+        await query.edit_message_text(
+            "Отправьте прокси (ip:port:user:pass или ip:port):",
+            reply_markup=_kb_back("m_proxy"),
+        )
+
+    elif d == "proxy_mass":
+        context.user_data["step"] = STEP_PROXY_MASS
+        await query.edit_message_text(
+            "Отправьте прокси (каждый с новой строки):",
+            reply_markup=_kb_back("m_proxy"),
+        )
+
+    elif d == "proxy_del":
+        proxies = data.get("proxies", [])
+        if not proxies:
+            await query.answer("Нет прокси")
+            return
+        kb = [[InlineKeyboardButton(f"🗑 {p[:35]}...", callback_data=f"proxy_rm_{i}")] for i, p in enumerate(proxies)]
+        kb.append([InlineKeyboardButton("◀ Назад", callback_data="nav_m_proxy")])
+        await query.edit_message_text("Удалить прокси:", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif d.startswith("proxy_rm_"):
+        idx = int(d.split("_")[2])
+        proxies = data.get("proxies", [])
+        if 0 <= idx < len(proxies):
+            proxies.pop(idx)
+            data["proxies"] = proxies
+            save_user_data(uid, data)
+        await query.edit_message_text("✅ Удалено", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ К прокси", callback_data="nav_m_proxy")]]))
 
     # === СЕССИИ ===
     elif d == "m_sess":
@@ -590,7 +662,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts = text.split(":", 1)
             email, password = parts[0].strip(), parts[1]
             data["accounts"] = data.get("accounts", [])
-            data["accounts"].append({"email": email, "password": password, "proxy": "", "status": "unknown"})
+            data["accounts"].append({"email": email, "password": password, "status": "unknown"})
             save_user_data(uid, data)
             _clear_step(context)
             await update.message.reply_text(f"✅ Аккаунт добавлен: {email}", reply_markup=_main_keyboard())
@@ -661,6 +733,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user_data(uid, data)
         await update.message.reply_text(f"✅ Добавлено {len(accs_new)} аккаунтов", reply_markup=_main_keyboard())
 
+    elif step == STEP_PROXY_ADD:
+        proxy = text.strip()
+        _clear_step(context)
+        if proxy and proxy != "-":
+            data["proxies"] = data.get("proxies", []) + [proxy]
+            save_user_data(uid, data)
+            await update.message.reply_text("✅ Прокси добавлен", reply_markup=_main_keyboard())
+        else:
+            await update.message.reply_text("Отправьте прокси (ip:port:user:pass)", reply_markup=_main_keyboard())
+
+    elif step == STEP_PROXY_MASS:
+        proxies_new = _parse_proxies(text)
+        _clear_step(context)
+        if proxies_new:
+            data["proxies"] = data.get("proxies", []) + proxies_new
+            save_user_data(uid, data)
+            await update.message.reply_text(f"✅ Добавлено {len(proxies_new)} прокси", reply_markup=_main_keyboard())
+        else:
+            await update.message.reply_text("Отправьте прокси (каждый с новой строки)", reply_markup=_main_keyboard())
+
     elif step == STEP_SESS_PROXY_EDIT:
         idx = context.user_data.get("sess_edit_idx", 0)
         jobs = data.get("jobs", [])
@@ -716,8 +808,10 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
     accounts = data.get("accounts", [])
     jobs = []
 
+    proxies = data.get("proxies", [])
+
     if links:
-        # Режим: ссылки при запуске, ротация по аккаунтам
+        # Режим: ссылки при запуске, ротация по аккаунтам, рандомный прокси
         if not accounts:
             await context.bot.send_message(user_id, "❌ Добавьте аккаунты.")
             return
@@ -725,10 +819,10 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
         for i, acc in enumerate(accounts):
             acc_links = [links[j] for j in range(i, len(links), n)]
             if acc_links:
-                proxy_str = acc.get("proxy", "").strip() or None
+                proxy_str = random.choice(proxies).strip() if proxies else None
                 jobs.append((acc, proxy_str, acc_links))
     else:
-        # Режим: сессии из jobs (старый)
+        # Режим: сессии из jobs (старый), прокси из сессии или рандом
         jobs_raw = data.get("jobs", [])
         acc_map = {a.get("email"): a for a in accounts}
         for j in jobs_raw:
@@ -738,7 +832,10 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
             acc_links = j.get("links", [])
             if not acc_links:
                 continue
-            jobs.append((acc, j.get("proxy", "").strip() or None, acc_links))
+            proxy_str = j.get("proxy", "").strip() or None
+            if not proxy_str and proxies:
+                proxy_str = random.choice(proxies).strip()
+            jobs.append((acc, proxy_str, acc_links))
 
     if not jobs:
         await context.bot.send_message(user_id, "❌ Нет сессий с ссылками." if not links else "❌ Нет ссылок.")
@@ -757,7 +854,7 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
         pass
     _run_log_msg[user_id] = {"chat_id": chat_id, "message_id": msg.message_id, "last_edit": 0, "bot_id": bot_user_id, "search_id": search_id}
 
-    stats = {"success": 0, "error": 0}
+    stats = {"success": 0, "error": 0, "skipped": 0}
 
     def on_log(msg: str):
         asyncio.create_task(_log(user_id, msg, context))
@@ -767,6 +864,8 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
             stats["success"] += 1
         elif status == "error":
             stats["error"] += 1
+        elif status == "skipped":
+            stats["skipped"] += 1
 
     async def on_screenshot(screenshot_bytes: bytes, caption: str):
         try:
@@ -797,8 +896,11 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
             await sender.run_jobs(built_jobs, on_status=on_status, on_screenshot=on_screenshot if SCREENSHOT_AFTER_SEND else None)
             await sender.stop()
             on_log("✅ Завершено")
-            total = stats["success"] + stats["error"]
-            on_log(f"📊 Результат: Успешно {stats['success']} / Не успешно {stats['error']} (всего {total})")
+            total = stats["success"] + stats["error"] + stats["skipped"]
+            parts = [f"Успешно {stats['success']}", f"Не успешно {stats['error']}"]
+            if stats["skipped"]:
+                parts.append(f"Пропущено (ч/с) {stats['skipped']}")
+            on_log(f"📊 Результат: {' / '.join(parts)} (всего {total})")
         except asyncio.CancelledError:
             on_log("⏹ Остановлено")
         except Exception as e:
@@ -856,9 +958,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     bot_user_id = get_or_create_bot_user_id(uid)
     acc_count = len(data.get("accounts", []))
+    proxy_count = len(data.get("proxies", []))
     job_count = len(data.get("jobs", []))
     await update.message.reply_text(
-        f"🚀 BA Sender\n\nВаш ID: {bot_user_id}\nАккаунтов: {acc_count} | Сессий: {job_count}\n\nВыберите:",
+        f"🚀 BA Sender\n\nВаш ID: {bot_user_id}\nАккаунтов: {acc_count} | Прокси: {proxy_count} | Сессий: {job_count}\n\nВыберите:",
         reply_markup=_main_keyboard(),
     )
 

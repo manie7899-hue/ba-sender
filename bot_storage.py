@@ -68,6 +68,7 @@ def _user_file(user_id: int) -> Path:
 def _default_data() -> dict:
     return {
         "accounts": [],
+        "proxies": [],
         "message": "Zdravo! Zanima me ovaj oglas. Da li je još uvijek dostupan?",
         "delay_min": 3,
         "delay_max": 5,
@@ -102,6 +103,44 @@ def save_user_data(user_id: int, data: dict) -> bool:
         return True
     except Exception:
         return False
+
+
+_BLACKLIST_FILE = BOT_STORAGE_DIR / "blacklist_sellers.json"
+
+
+def _load_blacklist() -> set:
+    """Глобальный чёрный список продавцов (никнеймы, lowercase)."""
+    try:
+        if _BLACKLIST_FILE.exists():
+            with open(_BLACKLIST_FILE, "r", encoding="utf-8") as f:
+                return set(x.lower() for x in json.load(f))
+    except Exception:
+        pass
+    return set()
+
+
+def _save_blacklist(sellers: set) -> bool:
+    try:
+        BOT_STORAGE_DIR.mkdir(exist_ok=True)
+        with open(_BLACKLIST_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(sellers), f, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
+
+def is_seller_blacklisted(seller_username: str) -> bool:
+    if not seller_username or not str(seller_username).strip():
+        return False
+    return str(seller_username).strip().lower() in _load_blacklist()
+
+
+def add_seller_to_blacklist(seller_username: str) -> bool:
+    if not seller_username or not str(seller_username).strip():
+        return False
+    s = _load_blacklist()
+    s.add(str(seller_username).strip().lower())
+    return _save_blacklist(s)
 
 
 def list_pending_users() -> list[tuple[int, dict]]:
