@@ -572,21 +572,21 @@ class OLXSender:
                         except Exception:
                             continue
                 if not chat_clicked:
-                    self._log("Поиск самого нового диалога (первый в списке)...")
-                    # Самый новый диалог — обычно первый в списке (не в навигации)
+                    self._log("Поиск самого нового диалога (пропуск системных сообщений OLX)...")
+                    # Первый диалог с продавцом, НЕ системное сообщение OLX (пароль, уведомления и т.д.)
                     clicked = await page.evaluate("""() => {
                         const links = Array.from(document.querySelectorAll('a[href*="/poruke/"], a[href*="/poruka/"]'));
                         const listLinks = [];
                         for (const a of links) {
                             const href = (a.getAttribute('href') || '').split('?')[0];
-                            if (/\\/poruke\\/\\d+|\\/poruka\\/\\d+/.test(href)) {
-                                const inNav = a.closest('nav') || a.closest('header') || a.closest('[role="navigation"]');
-                                if (!inNav && a.offsetParent !== null) {
-                                    listLinks.push(a);
-                                }
-                            }
+                            if (!/\\/poruke\\/\\d+|\\/poruka\\/\\d+/.test(href)) continue;
+                            const inNav = a.closest('nav') || a.closest('header') || a.closest('[role="navigation"]');
+                            if (inNav || a.offsetParent === null) continue;
+                            const item = a.closest('[class*="chat"],[class*="item"],[class*="conversation"],[class*="thread"],[class*="list"]') || a.parentElement;
+                            const text = ((item ? item.textContent : '') + ' ' + (a.textContent || '')).toLowerCase();
+                            if (text.includes('naš sistem') || text.includes('poslane od strane') || text.includes('administracije') && text.includes('poruke')) continue;
+                            listLinks.push(a);
                         }
-                        // Кликаем первый — самый новый диалог
                         if (listLinks.length > 0) {
                             listLinks[0].click();
                             return true;
