@@ -51,6 +51,10 @@ def _parse_proxy_for_requests(proxy_str: str, use_socks: bool = False, encode_au
             else:
                 auth = f"{user}:{password}"
             proxy_url = f"{scheme}://{auth}@{host}:{port}"
+        elif len(parts) == 3:
+            host, port, user = parts[0], parts[1], parts[2]
+            auth = f"{quote(user, safe='')}:" if encode_auth else f"{user}:"
+            proxy_url = f"{scheme}://{auth}@{host}:{port}"
         elif len(parts) >= 2:
             proxy_url = f"{scheme}://{parts[0]}:{parts[1]}"
         else:

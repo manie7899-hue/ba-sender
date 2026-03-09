@@ -19,8 +19,9 @@ def load_data() -> dict:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            import logging
+            logging.getLogger(__name__).warning("Не удалось загрузить данные: %s", e)
     return {
         "accounts": [],
         "proxy": "",

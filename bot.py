@@ -33,7 +33,10 @@ except ImportError:
 try:
     from config import ADMIN_CHAT_ID
 except (ImportError, AttributeError):
-    ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))
+    try:
+        ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))
+    except (ValueError, TypeError):
+        ADMIN_CHAT_ID = 0
 try:
     from config import SCREENSHOT_AFTER_SEND
 except (ImportError, AttributeError):
@@ -46,6 +49,7 @@ _last_search_id: dict[int, str] = {}  # user_id -> last search_id for logs scree
 _admin_log_lines: list[str] = []
 _admin_log_msg: dict = {}  # {chat_id, message_id, last_edit}
 _admin_log_lock = asyncio.Lock()
+_username_cache: dict[int, str] = {}  # user_id -> @username для отображения в логах
 LOG_MAX = 50
 LOG_EDIT_THROTTLE = 1.2
 ADMIN_LOG_MAX = 80
@@ -142,13 +146,32 @@ def _main_keyboard():
     ])
 
 
+async def _get_username_display(user_id: int, context=None) -> str:
+    """Получить @username для отображения (из кэша или запроса)."""
+    username = _username_cache.get(user_id)
+    if username:
+        return f"@{username}"
+    try:
+        bot = (context.bot if context else None) or (_bot_app.bot if _bot_app else None)
+        if bot:
+            chat = await bot.get_chat(user_id)
+            un = (chat.username or "").strip()
+            if un:
+                _username_cache[user_id] = un
+                return f"@{un}"
+    except Exception:
+        pass
+    return ""
+
+
 async def _admin_log(user_id: int, msg: str, context=None):
     """Добавить в общий лог и обновить сообщение в чате заявок (с троттлингом)."""
     if not _admin_chat_enabled():
         return
     bot_id = get_or_create_bot_user_id(user_id)
+    username_disp = await _get_username_display(user_id, context)
     ts = datetime.now().strftime("%H:%M:%S")
-    line = f"[{ts}] {bot_id}: {msg}"
+    line = f"[{ts}] {bot_id} {username_disp}: {msg}".strip()
     _admin_log_lines.append(line)
     if len(_admin_log_lines) > ADMIN_LOG_MAX:
         _admin_log_lines.pop(0)
@@ -198,7 +221,8 @@ async def _log(user_id: int, msg: str, context=None):
         logs = _user_logs[user_id][-LOG_MAX:]
         bot_id = run_state.get("bot_id") or get_or_create_bot_user_id(user_id)
         search_id = run_state.get("search_id", "")
-        txt = f"📋 Лог {search_id} ({bot_id})\n\n" + "\n".join(logs[-25:])
+        username_disp = await _get_username_display(user_id, context)
+        txt = f"📋 Лог {search_id} ({bot_id} {username_disp})\n\n" + "\n".join(logs[-25:])
         if len(txt) > 4000:
             txt = txt[-4000:]
         now = time.monotonic()
@@ -236,7 +260,8 @@ async def _run_log_final_update(user_id: int, context=None):
     logs = _user_logs.get(user_id, [])[-25:]
     bot_id = run_state.get("bot_id") or get_or_create_bot_user_id(user_id)
     search_id = run_state.get("search_id", "")
-    txt = f"📋 Лог {search_id} ({bot_id})\n\n" + "\n".join(logs) if logs else f"📋 Лог {search_id} ({bot_id})\n\n(пусто)"
+    username_disp = await _get_username_display(user_id, context)
+    txt = f"📋 Лог {search_id} ({bot_id} {username_disp})\n\n" + "\n".join(logs) if logs else f"📋 Лог {search_id} ({bot_id} {username_disp})\n\n(пусто)"
     if len(txt) > 4000:
         txt = txt[-4000:]
     try:
@@ -276,6 +301,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = update.effective_user.id
+    if update.effective_user.username:
+        _username_cache[uid] = update.effective_user.username
     chat_id = update.effective_chat.id
     data = load_user_data(uid)
     d = query.data
@@ -475,7 +502,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Выберите аккаунт для изменения:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif d.startswith("acc_ed_"):
-        idx = int(d.split("_")[2])
+        try:
+            idx = int(d.split("_")[2])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка", show_alert=True)
+            return
         accs = data.get("accounts", [])
         if 0 <= idx < len(accs):
             context.user_data["step"] = STEP_ACC_EDIT
@@ -495,7 +526,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Удалить аккаунт:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif d.startswith("acc_rm_"):
-        idx = int(d.split("_")[2])
+        try:
+            idx = int(d.split("_")[2])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка", show_alert=True)
+            return
         accs = data.get("accounts", [])
         if 0 <= idx < len(accs):
             email = accs[idx].get("email", "")
@@ -540,7 +575,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Удалить прокси:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif d.startswith("proxy_rm_"):
-        idx = int(d.split("_")[2])
+        try:
+            idx = int(d.split("_")[2])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка", show_alert=True)
+            return
         proxies = data.get("proxies", [])
         if 0 <= idx < len(proxies):
             proxies.pop(idx)
@@ -570,7 +609,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Шаг 1/3: Выберите аккаунт:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif d.startswith("sess_acc_"):
-        idx = int(d.split("_")[2])
+        try:
+            idx = int(d.split("_")[2])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка", show_alert=True)
+            return
         accs = data.get("accounts", [])
         if 0 <= idx < len(accs):
             context.user_data["step"] = STEP_PROXY
@@ -597,7 +640,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Изменить сессию:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif d.startswith("sess_ed_"):
-        idx = int(d.split("_")[2])
+        try:
+            idx = int(d.split("_")[2])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка", show_alert=True)
+            return
         jobs = data.get("jobs", [])
         if 0 <= idx < len(jobs):
             context.user_data["step"] = STEP_SESS_PROXY_EDIT
@@ -610,7 +657,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     elif d.startswith("sess_ln_"):
-        idx = int(d.split("_")[2])
+        try:
+            idx = int(d.split("_")[2])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка", show_alert=True)
+            return
         jobs = data.get("jobs", [])
         if 0 <= idx < len(jobs):
             context.user_data["step"] = STEP_SESS_ADD_LINKS
@@ -630,7 +681,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Удалить сессию:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif d.startswith("sess_rm_"):
-        idx = int(d.split("_")[2])
+        try:
+            idx = int(d.split("_")[2])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка", show_alert=True)
+            return
         jobs = data.get("jobs", [])
         if 0 <= idx < len(jobs):
             jobs.pop(idx)
@@ -718,6 +773,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    if update.effective_user.username:
+        _username_cache[uid] = update.effective_user.username
     text = update.message.text.strip()
     data = load_user_data(uid)
 
@@ -783,7 +840,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["jobs"] = data.get("jobs", [])
             if data["jobs"]:
                 data["jobs"][-1]["links"] = links
-                save_user_data(uid, data)
+            else:
+                data["jobs"].append({"account_email": "", "proxy": "", "links": links})
+            save_user_data(uid, data)
             await update.message.reply_text(f"✅ Сессия создана, {len(links)} ссылок", reply_markup=_main_keyboard())
         else:
             await update.message.reply_text("Отправьте ссылки на olx.ba")
@@ -916,18 +975,31 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
         await context.bot.send_message(user_id, "❌ Нет сессий с ссылками." if not links else "❌ Нет ссылок.")
         return
 
+    # Каждый запуск — новый лог: очищаем старые записи для этого пользователя
+    _user_logs[user_id] = []
+
     bot_user_id = get_or_create_bot_user_id(user_id)
     search_id = get_next_search_id()
     chat_id = user_id
     if query:
         await query.edit_message_text("▶️ Запуск...")
         chat_id = query.message.chat_id
-    msg = await context.bot.send_message(chat_id, f"📋 Лог {search_id} ({bot_user_id})\n\nЗапуск...")
+    username_disp = await _get_username_display(user_id, context)
+    msg = await context.bot.send_message(chat_id, f"📋 Лог {search_id} ({bot_user_id} {username_disp})\n\nЗапуск...")
     try:
         await context.bot.pin_chat_message(chat_id=chat_id, message_id=msg.message_id)
     except Exception:
         pass
     _run_log_msg[user_id] = {"chat_id": chat_id, "message_id": msg.message_id, "last_edit": 0, "bot_id": bot_user_id, "search_id": search_id}
+
+    # Отправляем новое сообщение в чат заявок о каждом запуске
+    if _admin_chat_enabled():
+        total_links = sum(len(j[2]) for j in jobs)
+        run_msg = f"▶️ Запуск {search_id} ({bot_user_id} {username_disp}) — {total_links} ссылок"
+        try:
+            await context.bot.send_message(ADMIN_CHAT_ID, run_msg)
+        except Exception:
+            pass
 
     stats = {"success": 0, "error": 0, "skipped": 0}
 
@@ -1064,6 +1136,8 @@ async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _clear_step(context)
     uid = update.effective_user.id
+    if update.effective_user.username:
+        _username_cache[uid] = update.effective_user.username
     data = load_user_data(uid)
 
     if is_user_banned(uid):

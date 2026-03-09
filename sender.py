@@ -3,13 +3,21 @@
 
 import asyncio
 import random
+import threading
 import re
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 from playwright.async_api import async_playwright, Browser, BrowserContext
 
-from config import OLX_LOGIN_URL, OLX_PROFILE_URL, OLX_MESSAGES_URL, BLOCKED_KEYWORDS, INVALID_CREDENTIALS_KEYWORDS
+try:
+    from config import OLX_LOGIN_URL, OLX_PROFILE_URL, OLX_MESSAGES_URL, BLOCKED_KEYWORDS, INVALID_CREDENTIALS_KEYWORDS
+except ImportError:
+    OLX_LOGIN_URL = "https://www.olx.ba/login"
+    OLX_PROFILE_URL = "https://www.olx.ba/profil"
+    OLX_MESSAGES_URL = "https://www.olx.ba/poruke"
+    BLOCKED_KEYWORDS = ["blokiran", "blocked", "suspend", "ban", "disabled"]
+    INVALID_CREDENTIALS_KEYWORDS = ["pogrešan", "wrong", "invalid", "incorrect"]
 
 try:
     from bot_storage import is_seller_blacklisted, add_seller_to_blacklist
@@ -109,6 +117,7 @@ class OLXSender:
         self.max_concurrent = max_concurrent
         self._proxy = proxy
         self._proxy_list = proxy_list or []
+        self._proxy_lock = threading.Lock()
         self._on_log = on_log
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -162,8 +171,9 @@ class OLXSender:
     def _get_proxy_for_task(self) -> Optional[dict]:
         """Получить прокси для текущей задачи (ротация из списка)"""
         if self._proxy_list:
-            proxy_str = self._proxy_list[self._proxy_index % len(self._proxy_list)]
-            self._proxy_index += 1
+            with self._proxy_lock:
+                proxy_str = self._proxy_list[self._proxy_index % len(self._proxy_list)]
+                self._proxy_index += 1
             return parse_proxy(proxy_str)
         if self._proxy:
             return parse_proxy(self._proxy)
@@ -215,8 +225,9 @@ class OLXSender:
         ctx = context or self._context
         if not ctx:
             return False
-        page = await ctx.new_page()
+        page = None
         try:
+            page = await ctx.new_page()
             self._log("Переход на страницу входа...")
             await page.goto(OLX_LOGIN_URL, wait_until="load", timeout=30000)
             await asyncio.sleep(0.6)
@@ -352,10 +363,11 @@ class OLXSender:
             await page.close()
             return True
         except Exception as e:
-            try:
-                await page.close()
-            except Exception:
-                pass
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
             if on_status:
                 on_status("login", "error", str(e))
             raise
@@ -375,8 +387,9 @@ class OLXSender:
             temp_ctx = False
         if not ctx:
             return {"status": "error", "message": "Браузер не запущен"}
-        page = await ctx.new_page()
+        page = None
         try:
+            page = await ctx.new_page()
             self._log("Проверка: переход на страницу входа...")
             await page.goto(OLX_LOGIN_URL, wait_until="load", timeout=30000)
             await asyncio.sleep(0.4)
@@ -456,10 +469,11 @@ class OLXSender:
             return {"status": "invalid", "message": "Не удалось войти — проверьте логин и пароль"}
             
         except Exception as e:
-            try:
-                await page.close()
-            except Exception:
-                pass
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
             return {"status": "error", "message": str(e)}
         finally:
             if temp_ctx and ctx:
@@ -520,6 +534,15 @@ class OLXSender:
                 await asyncio.sleep(1.5)
                 await self._accept_consent_dialog(page)
                 await asyncio.sleep(0.5)
+                # Обновляем страницу, чтобы список диалогов показал только что отправленное сообщение
+                self._log("Обновление страницы сообщений...")
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=15000)
+                    await asyncio.sleep(1.5)
+                    await self._accept_consent_dialog(page)
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    self._log(f"Обновление страницы: {e}")
 
             if not chat_clicked:
                 seller = (task.seller_username or "").strip().lower()
@@ -549,18 +572,24 @@ class OLXSender:
                         except Exception:
                             continue
                 if not chat_clicked:
-                    self._log("Поиск самого нового диалога...")
+                    self._log("Поиск самого нового диалога (первый в списке)...")
+                    # Самый новый диалог — обычно первый в списке (не в навигации)
                     clicked = await page.evaluate("""() => {
                         const links = Array.from(document.querySelectorAll('a[href*="/poruke/"], a[href*="/poruka/"]'));
+                        const listLinks = [];
                         for (const a of links) {
                             const href = (a.getAttribute('href') || '').split('?')[0];
                             if (/\\/poruke\\/\\d+|\\/poruka\\/\\d+/.test(href)) {
                                 const inNav = a.closest('nav') || a.closest('header') || a.closest('[role="navigation"]');
                                 if (!inNav && a.offsetParent !== null) {
-                                    a.click();
-                                    return true;
+                                    listLinks.push(a);
                                 }
                             }
+                        }
+                        // Кликаем первый — самый новый диалог
+                        if (listLinks.length > 0) {
+                            listLinks[0].click();
+                            return true;
                         }
                         return false;
                     }""")
@@ -568,6 +597,11 @@ class OLXSender:
                         chat_clicked = True
                         self._log("Открыт самый новый диалог")
                         await asyncio.sleep(1.2)
+                        try:
+                            await page.wait_for_url(re.compile(r"/poruke/\d+|/poruka/\d+"), timeout=5000)
+                            await asyncio.sleep(0.8)
+                        except Exception:
+                            pass
                     if not chat_clicked:
                         all_links = await page.query_selector_all('a[href*="/poruke/"], a[href*="/poruka/"]')
                         for el in all_links:
@@ -632,6 +666,7 @@ class OLXSender:
             if not self._running or not ctx:
                 return False
                 
+            page = None
             try:
                 if on_status:
                     on_status(task.id, "running", None)
@@ -647,14 +682,17 @@ class OLXSender:
                     await self._accept_consent_dialog(page)
                     await asyncio.sleep(0.1)
                     # Извлекаем никнейм продавца (ссылка /profil/username)
+                    _SKIP_PROFIL = ("aktivni", "zavrseni", "dojmovi", "artikal", "profil", "oglas", "poruke", "poruka", "login")
                     try:
                         for a in await page.query_selector_all('a[href*="/profil/"]'):
                             href = await a.get_attribute("href") or ""
                             m = re.search(r"/profil/([^/?]+)", href)
-                            if m and m.group(1) not in ("aktivni", "zavrseni", "dojmovi"):
-                                task.seller_username = m.group(1)
-                                self._log(f"Продавец: {task.seller_username}")
-                                break
+                            if m:
+                                uname = m.group(1).strip()
+                                if uname.lower() not in _SKIP_PROFIL and not uname.isdigit() and len(uname) >= 2:
+                                    task.seller_username = uname
+                                    self._log(f"Продавец: {task.seller_username}")
+                                    break
                     except Exception:
                         pass
                     # Проверка чёрного списка (глобальный для всех пользователей)
@@ -899,16 +937,26 @@ class OLXSender:
                                     self._log("✓ Ссылка отправлена")
                     await asyncio.sleep(0.3)
                     await self._take_chat_screenshot(page, task, on_screenshot)
-                    if task.seller_username:
+                    # Добавляем в ЧС только валидные никнеймы (не ID, не служебные)
+                    if task.seller_username and not task.seller_username.isdigit() and len(task.seller_username) >= 3:
                         add_seller_to_blacklist(task.seller_username)
                     if on_status:
                         on_status(task.id, "success", None)
                     return True
                         
                 finally:
-                    await page.close()
+                    if page:
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
                     
             except Exception as e:
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
                 if on_status:
                     on_status(task.id, "error", str(e))
                 return False
@@ -946,7 +994,7 @@ class OLXSender:
         job_ctx = await self._create_context_with_proxy(proxy_str)
         try:
             self._log(f"═══ Сессия: {account.get('email', '?')} (прокси: {proxy_str[:20] + '...' if proxy_str else 'нет'}) ═══")
-            ok = await self.login(account["email"], account["password"], context=job_ctx)
+            ok = await self.login(account.get("email", ""), account.get("password", ""), context=job_ctx)
             if not ok:
                 self._log(f"⚠ Не удалось войти: {account.get('email', '?')}")
                 return False

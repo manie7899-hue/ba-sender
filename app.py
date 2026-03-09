@@ -13,8 +13,14 @@ from typing import Optional
 from datetime import datetime
 
 from sender import OLXSender, SendTask
-from config import DEFAULT_DELAY_MIN, DEFAULT_DELAY_MAX, DEFAULT_MAX_CONCURRENT, REDSCRIPT_API_KEY
 from storage import load_data, save_data
+
+try:
+    from config import DEFAULT_DELAY_MIN, DEFAULT_DELAY_MAX, DEFAULT_MAX_CONCURRENT, REDSCRIPT_API_KEY
+except ImportError:
+    DEFAULT_DELAY_MIN, DEFAULT_DELAY_MAX = 3, 7
+    DEFAULT_MAX_CONCURRENT = 2
+    REDSCRIPT_API_KEY = ""
 from telegram_api import create_telegram_link, fetch_listing_data
 
 ctk.set_appearance_mode("dark")
@@ -336,7 +342,7 @@ class BASenderApp(ctk.CTk):
         if not acc:
             acc = self.accounts[0]
         idx = next((i for i, a in enumerate(self.accounts) if a["email"] == acc["email"]), 0)
-        d = AccountDialog(self, "Редактировать аккаунт", acc["email"], acc["password"])
+        d = AccountDialog(self, "Редактировать аккаунт", acc.get("email", ""), acc.get("password", ""))
         self.wait_window(d)
         if d.email:
             self.accounts[idx] = {"email": d.email, "password": d.password, "status": "unknown"}
@@ -367,7 +373,7 @@ class BASenderApp(ctk.CTk):
             sender = OLXSender(proxy=proxy, proxy_list=proxy_list, on_log=safe_log)
             show_browser = self.show_browser_var.get()
             loop.run_until_complete(sender.start(headless=not show_browser))
-            result = loop.run_until_complete(sender.validate_account(acc["email"], acc["password"]))
+            result = loop.run_until_complete(sender.validate_account(acc.get("email", ""), acc.get("password", "")))
             loop.run_until_complete(sender.stop())
             status = result["status"]
             msg = result["message"]
@@ -634,11 +640,11 @@ class BASenderApp(ctk.CTk):
             self.after(0, lambda: self._log("═══ Проверка аккаунтов после отправки ═══"))
             for acc, proxy_str, _ in jobs:
                 try:
-                    result = self.loop.run_until_complete(self.sender.validate_account(acc["email"], acc["password"], proxy_str=proxy_str))
+                    result = self.loop.run_until_complete(self.sender.validate_account(acc.get("email", ""), acc.get("password", ""), proxy_str=proxy_str))
                     status = result["status"]
                     msg = result["message"]
-                    self.after(0, lambda s=status, m=msg, e=acc["email"]: self._log(f"Проверка {e}: {m}"))
-                    idx = next((i for i, a in enumerate(self.accounts) if a["email"] == acc["email"]), -1)
+                    self.after(0, lambda s=status, m=msg, e=acc.get("email", ""): self._log(f"Проверка {e}: {m}"))
+                    idx = next((i for i, a in enumerate(self.accounts) if a.get("email") == acc.get("email")), -1)
                     if idx >= 0:
                         self.accounts[idx]["status"] = status
                 except Exception as ex:
