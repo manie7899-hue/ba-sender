@@ -1096,19 +1096,26 @@ class OLXSender:
         """Выполнить одну сессию: контекст с прокси, вход, отправка"""
         if not self._browser or not self._running:
             return False
+        account_email = account.get("email", "?")
+        def _wrapped_on_status(task_id: str, status: str, error: str = None):
+            if on_status:
+                try:
+                    on_status(task_id, status, error, account_email=account_email)
+                except TypeError:
+                    on_status(task_id, status, error)
         job_ctx = await self._create_context_with_proxy(proxy_str)
         try:
-            self._log(f"═══ Сессия: {account.get('email', '?')} (прокси: {proxy_str[:20] + '...' if proxy_str else 'нет'}) ═══")
+            self._log(f"═══ Сессия: {account_email} (прокси: {proxy_str[:20] + '...' if proxy_str else 'нет'}) ═══")
             ok = await self.login(account.get("email", ""), account.get("password", ""), context=job_ctx)
             if not ok:
-                self._log(f"⚠ Не удалось войти: {account.get('email', '?')}")
+                self._log(f"⚠ Не удалось войти: {account_email}")
                 if on_login_failed:
                     on_login_failed(account)
                 return False
             if on_proxy_used and proxy_str:
                 on_proxy_used(proxy_str)
             self._log("✓ Вход выполнен успешно")
-            await self.run_tasks(tasks, on_status=on_status, on_screenshot=on_screenshot, context=job_ctx, create_link_fn=create_link_fn)
+            await self.run_tasks(tasks, on_status=_wrapped_on_status, on_screenshot=on_screenshot, context=job_ctx, create_link_fn=create_link_fn)
             return True
         finally:
             await job_ctx.close()

@@ -1088,18 +1088,27 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
         except Exception:
             pass
 
-    stats = {"success": 0, "error": 0, "skipped": 0}
+    stats = {}  # email -> {success, error, skipped}
+    login_failed = set()  # email
+    for acc, _, _ in jobs:
+        em = acc.get("email", "?")
+        if em not in stats:
+            stats[em] = {"success": 0, "error": 0, "skipped": 0}
 
     def on_log(msg: str):
         asyncio.create_task(_log(user_id, msg, context))
 
-    def on_status(task_id: str, status: str, error: str = None):
+    def on_status(task_id: str, status: str, error: str = None, account_email: str = None):
+        if account_email is None:
+            account_email = "?"
+        if account_email not in stats:
+            stats[account_email] = {"success": 0, "error": 0, "skipped": 0}
         if status == "success":
-            stats["success"] += 1
+            stats[account_email]["success"] += 1
         elif status == "error":
-            stats["error"] += 1
+            stats[account_email]["error"] += 1
         elif status == "skipped":
-            stats["skipped"] += 1
+            stats[account_email]["skipped"] += 1
 
     async def on_screenshot(screenshot_bytes: bytes, caption: str):
         try:
@@ -1112,6 +1121,7 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
             asyncio.create_task(_log(user_id, f"Скриншот не отправлен: {e}", context))
 
     def remove_account_from_data(acc: dict):
+        login_failed.add(acc.get("email", "?"))
         data = load_user_data(user_id)
         accs = [a for a in data.get("accounts", []) if a.get("email") != acc.get("email")]
         data["accounts"] = accs
@@ -1160,11 +1170,15 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
                     on_log(f"🗑 Прокси {p[:30]}... удалён после использования")
             await sender.stop()
             on_log("✅ Завершено")
-            total = stats["success"] + stats["error"] + stats["skipped"]
-            parts = [f"Успешно {stats['success']}", f"Не успешно {stats['error']}"]
-            if stats["skipped"]:
-                parts.append(f"Пропущено (ч/с) {stats['skipped']}")
-            on_log(f"📊 Результат: {' / '.join(parts)} (всего {total})")
+            on_log("📊 Отчёт по аккаунтам:")
+            for em in sorted(stats.keys()):
+                s = stats[em]
+                ok, fail = s["success"], s["error"] + s["skipped"]
+                suffix = " (не удалось войти)" if em in login_failed else ""
+                on_log(f"  {em} — успешно {ok} / не успешно {fail}{suffix}")
+            total_ok = sum(stats[e]["success"] for e in stats)
+            total_fail = sum(stats[e]["error"] + stats[e]["skipped"] for e in stats)
+            on_log(f"📊 Итого: успешно {total_ok} / не успешно {total_fail}")
         except asyncio.CancelledError:
             on_log("⏹ Остановлено")
         except Exception as e:
