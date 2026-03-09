@@ -143,6 +143,40 @@ def add_seller_to_blacklist(seller_username: str) -> bool:
     return _save_blacklist(s)
 
 
+_APPROVED_FILE = BOT_STORAGE_DIR / "approved_users.json"
+
+
+def _load_approved() -> set:
+    """Глобальный список одобренных (запоминаем навсегда, даже при потере user_data)."""
+    try:
+        if _APPROVED_FILE.exists():
+            with open(_APPROVED_FILE, "r", encoding="utf-8") as f:
+                return set(int(x) for x in json.load(f) if str(x).isdigit())
+    except Exception:
+        pass
+    return set()
+
+
+def _save_approved(user_ids: set) -> bool:
+    try:
+        BOT_STORAGE_DIR.mkdir(exist_ok=True)
+        with open(_APPROVED_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(user_ids), f)
+        return True
+    except Exception:
+        return False
+
+
+def is_user_approved(user_id: int) -> bool:
+    return user_id in _load_approved()
+
+
+def add_approved_user(user_id: int) -> bool:
+    s = _load_approved()
+    s.add(user_id)
+    return _save_approved(s)
+
+
 _BANNED_FILE = BOT_STORAGE_DIR / "banned_users.json"
 
 

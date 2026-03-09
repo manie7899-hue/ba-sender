@@ -21,6 +21,7 @@ from bot_storage import (
     get_or_create_bot_user_id, get_next_search_id,
     is_seller_blacklisted, add_seller_to_blacklist,
     is_user_banned, add_banned_user, remove_banned_user,
+    is_user_approved, add_approved_user,
 )
 from sender import OLXSender, SendTask
 from telegram_api import create_telegram_link, fetch_listing_data
@@ -106,13 +107,16 @@ def _admin_chat_enabled() -> bool:
 
 
 def _user_has_access(uid: int) -> bool:
-    """Проверка доступа: бан > модерация. Одобренные запоминаются."""
+    """Проверка доступа: бан > модерация. Одобренные запоминаются навсегда."""
     if is_user_banned(uid):
         return False
+    if is_user_approved(uid):
+        return True
     if not _admin_chat_enabled():
         return True
     data = load_user_data(uid)
     if data.get("access_status") == "approved":
+        add_approved_user(uid)
         return True
     if data.get("access_status") in (None, "new") and (data.get("accounts") or data.get("jobs") or data.get("proxies")):
         return True
@@ -250,6 +254,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         approved = d.startswith("req_approve_")
         target_data["access_status"] = "approved" if approved else "rejected"
         save_user_data(target_uid, target_data)
+        if approved:
+            add_approved_user(target_uid)
         status_text = "✅ Одобрено" if approved else "❌ Отклонено"
         try:
             await query.edit_message_text(f"{query.message.text}\n\n{status_text}")
@@ -267,7 +273,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _admin_chat_enabled():
             await query.edit_message_text("Модерация отключена.", reply_markup=_main_keyboard())
             return
-        if data.get("access_status") == "approved":
+        if is_user_approved(uid) or data.get("access_status") == "approved":
+            if not is_user_approved(uid):
+                add_approved_user(uid)
+            data["access_status"] = "approved"
+            save_user_data(uid, data)
             await query.edit_message_text("У вас уже есть доступ.", reply_markup=_main_keyboard())
             return
         is_repeat = data.get("access_status") == "pending"
