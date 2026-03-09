@@ -153,7 +153,6 @@ class OLXSender:
             try:
                 btn = await page.query_selector(sel)
                 if btn and await btn.is_visible():
-                    self._log("Подтверждение соглашения (Privacy/Cookies)...")
                     await btn.click(force=True, timeout=5000)
                     await asyncio.sleep(0.2)
                     return True
@@ -183,7 +182,6 @@ class OLXSender:
                 return n > 0;
             }""")
             if removed:
-                self._log("Удалён блокирующий баннер cookies (qc-cmp2)")
                 await asyncio.sleep(0.2)
                 return True
         except Exception:
@@ -204,7 +202,6 @@ class OLXSender:
     async def start(self, headless: bool = True, create_context: bool = True) -> bool:
         """Запуск браузера. create_context=False для мультиаккаунта (контексты создаются per-job)"""
         try:
-            self._log("Запуск браузера (режим без окна)...")
             self._playwright = await async_playwright().start()
             launch_args = [
                 '--disable-blink-features=AutomationControlled',
@@ -217,7 +214,6 @@ class OLXSender:
                 headless=headless,
                 args=launch_args,
             )
-            self._log("Браузер запущен")
             self._context = None
             if create_context:
                 proxy_config = self._get_proxy_for_task() if self._proxy or self._proxy_list else None
@@ -250,7 +246,6 @@ class OLXSender:
         page = None
         try:
             page = await ctx.new_page()
-            self._log("Переход на страницу входа...")
             await page.goto(OLX_LOGIN_URL, wait_until="load", timeout=30000)
             await asyncio.sleep(0.8)
             await self._accept_consent_dialog(page)
@@ -262,7 +257,6 @@ class OLXSender:
                 await page.close()
                 return True
             
-            self._log("Заполнение формы входа...")
             # Приоритет: get_by_placeholder (OLX.BA: "Korisničko ime ili email", "Šifra")
             email_input = None
             for method, arg in [
@@ -324,7 +318,6 @@ class OLXSender:
             except (AttributeError, Exception):
                 await pass_input.fill(password, force=True)
             await asyncio.sleep(0.2)
-            self._log("Нажатие кнопки входа...")
             
             # Кнопка "Prijavi se" — приоритет get_by_role
             clicked = False
@@ -378,10 +371,8 @@ class OLXSender:
                             self._log(f"Ошибка входа: {err_text.strip()[:100]}")
                 except Exception:
                     pass
-                self._log("Вход не выполнен — остались на странице логина")
                 await page.close()
                 return False
-            self._log("Вход выполнен успешно")
             await page.close()
             return True
         except Exception as e:
@@ -523,11 +514,9 @@ class OLXSender:
             url = page.url
             chat_clicked = False
             if re.search(r"/poruke/\d+|/poruka/\d+", url):
-                self._log("Уже в диалоге с продавцом, делаю скриншот...")
                 await asyncio.sleep(0.8)
                 chat_clicked = True
             else:
-                self._log("Переход в Moje poruke для скриншота...")
                 navigated = False
                 # Сначала пробуем клик по ссылке (надёжнее с прокси, чем page.goto)
                 try:
@@ -557,7 +546,6 @@ class OLXSender:
                 await self._accept_consent_dialog(page)
                 await asyncio.sleep(0.25)
                 # Обновляем страницу, чтобы список диалогов показал только что отправленное сообщение
-                self._log("Обновление страницы сообщений...")
                 try:
                     await page.reload(wait_until="domcontentloaded", timeout=15000)
                     await asyncio.sleep(0.8)
@@ -569,7 +557,6 @@ class OLXSender:
             if not chat_clicked:
                 seller = (task.seller_username or "").strip().lower()
                 if seller:
-                    self._log(f"Поиск чата с продавцом {task.seller_username}...")
                     # Ищем ссылку/элемент, содержащий никнейм продавца
                     all_links = await page.query_selector_all('a[href*="/poruke/"], a[href*="/poruka/"]')
                     for el in all_links:
@@ -588,13 +575,11 @@ class OLXSender:
                             if text and seller in (text or "").lower():
                                 await el.click(force=True)
                                 chat_clicked = True
-                                self._log(f"Открыт чат с {task.seller_username}")
                                 await asyncio.sleep(0.15)
                                 break
                         except Exception:
                             continue
                 if not chat_clicked:
-                    self._log("Поиск диалога с продавцом (по ссылке на объявление)...")
                     # Только чаты с продавцами: в превью есть ссылка olx.one/artikal — системные сообщения OLX её не имеют
                     clicked = await page.evaluate("""() => {
                         const links = Array.from(document.querySelectorAll('a[href*="/poruke/"], a[href*="/poruka/"]'));
@@ -616,7 +601,6 @@ class OLXSender:
                     }""")
                     if clicked:
                         chat_clicked = True
-                        self._log("Открыт самый новый диалог")
                         await asyncio.sleep(0.15)
                         try:
                             await page.wait_for_url(re.compile(r"/poruke/\d+|/poruka/\d+"), timeout=5000)
@@ -633,7 +617,6 @@ class OLXSender:
                                     if not in_nav and await el.is_visible():
                                         await el.click(force=True)
                                         chat_clicked = True
-                                        self._log("Открыт диалог с продавцом")
                                         await asyncio.sleep(0.15)
                                         break
                             except Exception:
@@ -676,7 +659,6 @@ class OLXSender:
                         box = await el.bounding_box()
                         if box and box.get("width", 0) > 100 and box.get("height", 0) > 80:
                             screenshot_bytes = await el.screenshot(type="png")
-                            self._log("Скриншот области диалога")
                             break
                 except Exception:
                     continue
@@ -698,7 +680,6 @@ class OLXSender:
                     }""")
                     if rect and rect.get("width", 0) > 50 and rect.get("height", 0) > 50:
                         screenshot_bytes = await page.screenshot(type="png", clip=rect)
-                        self._log("Скриншот области сообщений")
                 except Exception:
                     pass
             if not screenshot_bytes:
@@ -708,7 +689,7 @@ class OLXSender:
                 await on_screenshot(screenshot_bytes, caption)
             else:
                 on_screenshot(screenshot_bytes, caption)
-            self._log("✓ Скриншот отправлен")
+            self._log("✓ Скрин")
             return True
         except Exception as e:
             self._log(f"Скриншот: {e}")
@@ -737,7 +718,6 @@ class OLXSender:
                 try:
                     # Переход на страницу объявления
                     short_url = task.listing_url[:60] + "..." if len(task.listing_url) > 60 else task.listing_url
-                    self._log(f"Сообщение продавцу: {short_url}")
                     await page.goto(task.listing_url, wait_until="domcontentloaded", timeout=30000)
                     await asyncio.sleep(0.5)
                     await self._accept_consent_dialog(page)
@@ -765,7 +745,6 @@ class OLXSender:
                         }""")
                         if seller_username:
                             task.seller_username = seller_username
-                            self._log(f"Продавец: {task.seller_username}")
                     except Exception:
                         pass
                     # Проверка чёрного списка (глобальный для всех пользователей)
@@ -775,8 +754,7 @@ class OLXSender:
                             on_status(task.id, "skipped", "blacklist")
                         return False
                     if not task.seller_username:
-                        self._log("Продавец не определён — проверка ЧС пропущена")
-                    self._log("Поиск кнопки Poruka...")
+                        pass
                     await asyncio.sleep(0.3)
                     await self._accept_consent_dialog(page)
                     await asyncio.sleep(0.2)
@@ -827,7 +805,6 @@ class OLXSender:
                         raise Exception("Не найдена кнопка Poruka")
                     
                     # Шаг 2: Ожидание появления формы сообщения (модал или новая страница)
-                    self._log("Ожидание формы сообщения...")
                     await asyncio.sleep(0.25)
                     
                     # Ждём навигации, если переход на страницу сообщений
@@ -938,7 +915,6 @@ class OLXSender:
                         return False
                     
                     # Первое сообщение — текст из меню (с повтором при неудаче)
-                    self._log("Заполнение текста сообщения...")
                     sent = False
                     for attempt in range(3):
                         sent = await _fill_and_send(msg_input, task.message)
@@ -959,17 +935,15 @@ class OLXSender:
                     if not sent:
                         raise Exception("Не найдена кнопка Pošalji poruku")
                     await asyncio.sleep(0.25)
-                    self._log(f"✓ Сообщение отправлено продавцу: {short_url}")
+                    self._log(f"✓ {short_url}")
                     
                     # Второе сообщение — ссылка (если есть). Возвращаемся на страницу объявления
                     if task.message_link:
                         await asyncio.sleep(0.2)
-                        self._log("Возврат на страницу объявления для отправки ссылки...")
                         await page.goto(task.listing_url, wait_until="domcontentloaded", timeout=30000)
                         await asyncio.sleep(random.uniform(0.15, 0.25))
                         await self._accept_consent_dialog(page)
                         await asyncio.sleep(0.1)
-                        self._log("Поиск кнопки Poruka для второго сообщения...")
                         contact_clicked2 = False
                         for method, arg in [
                             ("text", "Poruka"),
@@ -1026,10 +1000,9 @@ class OLXSender:
                                 except Exception:
                                     continue
                             if msg_input2:
-                                self._log("Отправка ссылки вторым сообщением...")
                                 if await _fill_and_send(msg_input2, task.message_link):
                                     await asyncio.sleep(0.2)
-                                    self._log("✓ Ссылка отправлена")
+                                    self._log("✓ Ссылка")
                     await asyncio.sleep(0.3)
                     await self._take_chat_screenshot(page, task, on_screenshot)
                     # Добавляем в ЧС только валидные никнеймы (не ID, не служебные)
@@ -1078,7 +1051,6 @@ class OLXSender:
             # Задержка перед следующим сообщением (кроме последнего)
             if i < len(tasks) - 1:
                 delay = random.uniform(self.delay_min, self.delay_max)
-                self._log(f"Пауза {delay:.1f} сек перед следующим...")
                 await asyncio.sleep(delay)
 
     async def run_single_job(
@@ -1104,7 +1076,7 @@ class OLXSender:
                     on_status(task_id, status, error)
         job_ctx = await self._create_context_with_proxy(proxy_str)
         try:
-            self._log(f"═══ Сессия: {account_email} (прокси: {proxy_str[:20] + '...' if proxy_str else 'нет'}) ═══")
+            self._log(f"═══ {account_email}")
             ok = await self.login(account.get("email", ""), account.get("password", ""), context=job_ctx)
             if not ok:
                 self._log(f"⚠ Не удалось войти: {account_email}")
@@ -1113,7 +1085,7 @@ class OLXSender:
                 return False
             if on_proxy_used and proxy_str:
                 on_proxy_used(proxy_str)
-            self._log("✓ Вход выполнен успешно")
+            self._log(f"✓ {account_email} вошёл")
             await self.run_tasks(tasks, on_status=_wrapped_on_status, on_screenshot=on_screenshot, context=job_ctx, create_link_fn=create_link_fn)
             return True
         finally:
@@ -1128,12 +1100,9 @@ class OLXSender:
         on_proxy_used: Optional[Callable[[str], None]] = None,
         create_link_fn: Optional[Callable] = None,
     ):
-        """Запуск сессий: вход по очереди (OLX блокирует параллельный логин), отправка — параллельно по контекстам"""
-        for i, (acc, proxy_str, tasks) in enumerate(jobs):
-            if not self._running:
-                break
-            if i > 0:
-                delay = random.uniform(3, 6)
-                self._log(f"Пауза {delay:.1f} сек перед следующим аккаунтом...")
-                await asyncio.sleep(delay)
-            await self.run_single_job(acc, proxy_str, tasks, on_status, on_screenshot, on_login_failed, on_proxy_used, create_link_fn)
+        """Запуск нескольких сессий параллельно"""
+        coros = [
+            self.run_single_job(acc, proxy_str, tasks, on_status, on_screenshot, on_login_failed, on_proxy_used, create_link_fn)
+            for acc, proxy_str, tasks in jobs
+        ]
+        await asyncio.gather(*coros)
