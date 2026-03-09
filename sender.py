@@ -131,27 +131,8 @@ class OLXSender:
             self._on_log(msg)
     
     async def _accept_consent_dialog(self, page) -> bool:
-        """Закрытие диалога согласия с cookies/Privacy (qc-cmp2). Удаляет overlay при неудаче."""
-        # Сначала удаляем overlay — самый надёжный способ (баннер часто блокирует клики)
-        try:
-            removed = await page.evaluate("""() => {
-                let n = 0;
-                const sel = ['#qc-cmp2-container', '.qc-cmp2-container', '.qc-cmp-cleanslate', '[id^="qc-cmp"]'];
-                for (const s of sel) {
-                    try {
-                        const els = document.querySelectorAll(s);
-                        els.forEach(el => { el.remove(); n++; });
-                    } catch(e) {}
-                }
-                return n > 0;
-            }""")
-            if removed:
-                self._log("Удалён блокирующий баннер cookies (qc-cmp2)")
-                await asyncio.sleep(0.2)
-                return True
-        except Exception:
-            pass
-        # Пробуем клик по кнопке Accept
+        """Закрытие диалога согласия с cookies/Privacy (qc-cmp2). Сначала клик Accept, при неудаче — удаление overlay."""
+        # Сначала пробуем клик по кнопке Accept (на странице логина удаление может мешать)
         consent_selectors = [
             '#qc-cmp2-ui button[class*="accept"]',
             '#qc-cmp2-ui button:has-text("Accept")',
@@ -185,6 +166,24 @@ class OLXSender:
                 return false;
             }""")
             if clicked:
+                await asyncio.sleep(0.2)
+                return True
+        except Exception:
+            pass
+        # Fallback: удаляем overlay, если клик не сработал
+        try:
+            removed = await page.evaluate("""() => {
+                let n = 0;
+                const sel = ['#qc-cmp2-container', '.qc-cmp2-container', '.qc-cmp-cleanslate'];
+                for (const s of sel) {
+                    try {
+                        document.querySelectorAll(s).forEach(el => { el.remove(); n++; });
+                    } catch(e) {}
+                }
+                return n > 0;
+            }""")
+            if removed:
+                self._log("Удалён блокирующий баннер cookies (qc-cmp2)")
                 await asyncio.sleep(0.2)
                 return True
         except Exception:
@@ -253,9 +252,9 @@ class OLXSender:
             page = await ctx.new_page()
             self._log("Переход на страницу входа...")
             await page.goto(OLX_LOGIN_URL, wait_until="load", timeout=30000)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.8)
             await self._accept_consent_dialog(page)
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.4)
             
             # Если уже залогинены — редирект
             if "login" not in page.url.lower():
@@ -366,9 +365,9 @@ class OLXSender:
                     await page.keyboard.press("Enter")
             
             try:
-                await page.wait_for_url(lambda u: "login" not in u.lower(), timeout=10000)
+                await page.wait_for_url(lambda u: "login" not in u.lower(), timeout=15000)
             except Exception:
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(1.5)
             url = page.url
             if "login" in url.lower():
                 try:
@@ -1129,9 +1128,12 @@ class OLXSender:
         on_proxy_used: Optional[Callable[[str], None]] = None,
         create_link_fn: Optional[Callable] = None,
     ):
-        """Запуск нескольких сессий одновременно (параллельно)"""
-        coros = [
-            self.run_single_job(acc, proxy_str, tasks, on_status, on_screenshot, on_login_failed, on_proxy_used, create_link_fn)
-            for acc, proxy_str, tasks in jobs
-        ]
-        await asyncio.gather(*coros)
+        """Запуск сессий: вход по очереди (OLX блокирует параллельный логин), отправка — параллельно по контекстам"""
+        for i, (acc, proxy_str, tasks) in enumerate(jobs):
+            if not self._running:
+                break
+            if i > 0:
+                delay = random.uniform(3, 6)
+                self._log(f"Пауза {delay:.1f} сек перед следующим аккаунтом...")
+                await asyncio.sleep(delay)
+            await self.run_single_job(acc, proxy_str, tasks, on_status, on_screenshot, on_login_failed, on_proxy_used, create_link_fn)
