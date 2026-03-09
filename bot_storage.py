@@ -246,6 +246,41 @@ def remove_banned_user(user_id: int) -> bool:
     return _save_banned(s)
 
 
+def save_run_state(user_id: int, state: dict) -> bool:
+    """Сохранить состояние рассылки для возобновления."""
+    try:
+        BOT_STORAGE_DIR.mkdir(exist_ok=True)
+        path = BOT_STORAGE_DIR / f"run_state_{user_id}.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def load_run_state(user_id: int) -> Optional[dict]:
+    """Загрузить состояние рассылки."""
+    try:
+        path = BOT_STORAGE_DIR / f"run_state_{user_id}.json"
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+def clear_run_state(user_id: int) -> bool:
+    """Удалить сохранённое состояние рассылки."""
+    try:
+        path = BOT_STORAGE_DIR / f"run_state_{user_id}.json"
+        if path.exists():
+            path.unlink()
+        return True
+    except Exception:
+        return False
+
+
 def list_pending_users() -> list[tuple[int, dict]]:
     """Список пользователей со статусом pending."""
     result = []

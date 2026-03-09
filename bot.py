@@ -20,6 +20,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 from bot_storage import (
     load_user_data, save_user_data, list_pending_users,
     get_or_create_bot_user_id, get_next_search_id,
+    save_run_state, load_run_state, clear_run_state,
     is_seller_blacklisted, add_seller_to_blacklist, remove_seller_from_blacklist,
     is_user_banned, add_banned_user, remove_banned_user,
     is_user_approved, add_approved_user,
@@ -149,14 +150,20 @@ def _kb_request_access():
     return InlineKeyboardMarkup([[InlineKeyboardButton("📝 Запросить доступ", callback_data="req_access")]])
 
 
-def _main_keyboard():
-    return InlineKeyboardMarkup([
+def _main_keyboard(user_id: int = None):
+    """Клавиатура главного меню. Если user_id — показываем Продолжить при наличии прерванной рассылки."""
+    rows = [
         [InlineKeyboardButton("👤 Аккаунты", callback_data="m_acc"), InlineKeyboardButton("🌐 Прокси", callback_data="m_proxy")],
         [InlineKeyboardButton("📋 Сессии", callback_data="m_sess"), InlineKeyboardButton("✉️ Сообщение", callback_data="m_msg")],
         [InlineKeyboardButton("📱 RedScript", callback_data="m_rs")],
         [InlineKeyboardButton("▶️ Запустить", callback_data="run"), InlineKeyboardButton("⏹ Стоп", callback_data="stop")],
-        [InlineKeyboardButton("📋 Логи", callback_data="logs")],
-    ])
+    ]
+    if user_id is not None:
+        state = load_run_state(user_id)
+        if state and state.get("completed") and len(state["completed"]) < state.get("total_count", 0):
+            rows.append([InlineKeyboardButton("▶️ Продолжить рассылку", callback_data="resume")])
+    rows.append([InlineKeyboardButton("📋 Логи", callback_data="logs")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def _get_username_display(user_id: int, context=None) -> str:
@@ -303,7 +310,7 @@ async def _show_screen(bot, chat_id: int, screen: str, context: ContextTypes.DEF
         proxy_count = len(data.get("proxies", []))
         job_count = len(data.get("jobs", []))
         txt = f"🚀 BA Sender\n\nАккаунтов: {acc_count} | Прокси: {proxy_count} | Сессий: {job_count}\n\nВыберите:"
-        await bot.edit_message_text(chat_id=chat_id, message_id=context._chat_data.get("msg_id"), text=txt, reply_markup=_main_keyboard())
+        await bot.edit_message_text(chat_id=chat_id, message_id=context._chat_data.get("msg_id"), text=txt, reply_markup=_main_keyboard(chat_id))
         return
     # Для edit_message_text нужен message_id - мы вызываем из callback, там есть query
     # Упростим: передаём query и делаем edit_message_text через него
@@ -360,14 +367,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # === ЗАПРОС ДОСТУПА ===
     if d == "req_access":
         if not _admin_chat_enabled():
-            await query.edit_message_text("Модерация отключена.", reply_markup=_main_keyboard())
+            await query.edit_message_text("Модерация отключена.", reply_markup=_main_keyboard(uid))
             return
         if is_user_approved(uid) or data.get("access_status") == "approved":
             if not is_user_approved(uid):
                 add_approved_user(uid)
             data["access_status"] = "approved"
             save_user_data(uid, data)
-            await query.edit_message_text("У вас уже есть доступ.", reply_markup=_main_keyboard())
+            await query.edit_message_text("У вас уже есть доступ.", reply_markup=_main_keyboard(uid))
             return
         is_repeat = data.get("access_status") == "pending"
         data["access_status"] = "pending"
@@ -428,7 +435,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             proxy_count = len(data.get("proxies", []))
             job_count = len(data.get("jobs", []))
             txt = f"🚀 BA Sender\n\nВаш ID: {bot_id}\nАккаунтов: {acc_count} | Прокси: {proxy_count} | Сессий: {job_count}\n\nВыберите:"
-            kb = _main_keyboard()
+            kb = _main_keyboard(uid)
         elif target == "m_acc":
             accs = data.get("accounts", [])
             lines = [f"{i+1}. {a.get('email','?')}" for i, a in enumerate(accs)]
@@ -475,7 +482,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             proxy_count = len(data.get("proxies", []))
             job_count = len(data.get("jobs", []))
             txt = f"🚀 BA Sender\n\nВаш ID: {bot_id}\nАккаунтов: {acc_count} | Прокси: {proxy_count} | Сессий: {job_count}\n\nВыберите:"
-            kb = _main_keyboard()
+            kb = _main_keyboard(uid)
         await query.edit_message_text(txt, reply_markup=kb)
         return
 
@@ -772,7 +779,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if uid in _running_tasks:
             _running_tasks[uid].cancel()
             await _log(uid, "Остановка...", context)
-        await query.edit_message_text("⏹ Остановлено", reply_markup=_main_keyboard())
+        await query.edit_message_text("⏹ Остановлено", reply_markup=_main_keyboard(uid))
+
+    elif d == "resume":
+        if uid in _running_tasks:
+            await query.answer("⏳ Уже выполняется")
+            return
+        state = load_run_state(uid)
+        if not state or not state.get("links") or len(state.get("completed", [])) >= state.get("total_count", 0):
+            await query.answer("Нет прерванной рассылки для продолжения")
+            return
+        _clear_step(context)
+        asyncio.create_task(_admin_log(uid, "Продолжение рассылки", context))
+        await query.edit_message_text("▶️ Продолжение рассылки...", reply_markup=_main_keyboard(uid))
+        await _run_sender(uid, context, links=None, resume_state=state)
 
     elif d == "logs":
         logs = _user_logs.get(uid, [])
@@ -833,12 +853,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             data["jobs"].append({"account_email": "", "proxy": "", "links": links})
         save_user_data(uid, data)
-        await update.message.reply_text(f"✅ Сессия создана, {len(links)} ссылок из файла", reply_markup=_main_keyboard())
+        await update.message.reply_text(f"✅ Сессия создана, {len(links)} ссылок из файла", reply_markup=_main_keyboard(uid))
 
     elif step == STEP_RUN_LINKS:
         _clear_step(context)
         asyncio.create_task(_admin_log(uid, f"Запуск рассылки: {len(links)} ссылок (из файла)", context))
-        await update.message.reply_text(f"▶️ Запуск: {len(links)} ссылок из файла", reply_markup=_main_keyboard())
+        await update.message.reply_text(f"▶️ Запуск: {len(links)} ссылок из файла", reply_markup=_main_keyboard(uid))
         await _run_sender(uid, context, links=links)
 
     elif step == STEP_SESS_ADD_LINKS:
@@ -848,7 +868,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             jobs[idx]["links"] = links
             save_user_data(uid, data)
             _clear_step(context)
-            await update.message.reply_text(f"✅ Ссылки обновлены: {len(links)} шт. из файла", reply_markup=_main_keyboard())
+            await update.message.reply_text(f"✅ Ссылки обновлены: {len(links)} шт. из файла", reply_markup=_main_keyboard(uid))
         else:
             await update.message.reply_text("Ошибка: сессия не найдена.")
 
@@ -878,7 +898,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["accounts"].append({"email": email, "password": password, "status": "unknown"})
             save_user_data(uid, data)
             _clear_step(context)
-            await update.message.reply_text(f"✅ Аккаунт добавлен: {email}", reply_markup=_main_keyboard())
+            await update.message.reply_text(f"✅ Аккаунт добавлен: {email}", reply_markup=_main_keyboard(uid))
         else:
             await update.message.reply_text("Формат: email:пароль")
 
@@ -896,7 +916,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         j["account_email"] = email
                 save_user_data(uid, data)
             _clear_step(context)
-            await update.message.reply_text(f"✅ Аккаунт обновлён: {email}", reply_markup=_main_keyboard())
+            await update.message.reply_text(f"✅ Аккаунт обновлён: {email}", reply_markup=_main_keyboard(uid))
         else:
             await update.message.reply_text("Формат: email:пароль")
 
@@ -929,7 +949,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 data["jobs"].append({"account_email": "", "proxy": "", "links": links})
             save_user_data(uid, data)
-            await update.message.reply_text(f"✅ Сессия создана, {len(links)} ссылок", reply_markup=_main_keyboard())
+            await update.message.reply_text(f"✅ Сессия создана, {len(links)} ссылок", reply_markup=_main_keyboard(uid))
         else:
             await update.message.reply_text("Отправьте ссылки на olx.ba или файл .txt (формат: 1. Link)")
 
@@ -937,21 +957,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         links = _parse_links(text)
         _clear_step(context)
         if not links:
-            await update.message.reply_text("Отправьте ссылки на olx.ba или файл .txt (формат: 1. Link)", reply_markup=_main_keyboard())
+            await update.message.reply_text("Отправьте ссылки на olx.ba или файл .txt (формат: 1. Link)", reply_markup=_main_keyboard(uid))
             return
         asyncio.create_task(_admin_log(uid, f"Запуск рассылки: {len(links)} ссылок", context))
-        await update.message.reply_text(f"▶️ Запуск: {len(links)} ссылок", reply_markup=_main_keyboard())
+        await update.message.reply_text(f"▶️ Запуск: {len(links)} ссылок", reply_markup=_main_keyboard(uid))
         await _run_sender(uid, context, links=links)
 
     elif step == STEP_ACC_MASS:
         accs_new = _parse_accounts(text)
         _clear_step(context)
         if not accs_new:
-            await update.message.reply_text("Формат: email:password (каждая с новой строки)", reply_markup=_main_keyboard())
+            await update.message.reply_text("Формат: email:password (каждая с новой строки)", reply_markup=_main_keyboard(uid))
             return
         data["accounts"] = data.get("accounts", []) + accs_new
         save_user_data(uid, data)
-        await update.message.reply_text(f"✅ Добавлено {len(accs_new)} аккаунтов", reply_markup=_main_keyboard())
+        await update.message.reply_text(f"✅ Добавлено {len(accs_new)} аккаунтов", reply_markup=_main_keyboard(uid))
 
     elif step == STEP_PROXY_ADD:
         proxy = text.strip()
@@ -959,9 +979,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if proxy and proxy != "-":
             data["proxies"] = data.get("proxies", []) + [proxy]
             save_user_data(uid, data)
-            await update.message.reply_text("✅ Прокси добавлен", reply_markup=_main_keyboard())
+            await update.message.reply_text("✅ Прокси добавлен", reply_markup=_main_keyboard(uid))
         else:
-            await update.message.reply_text("Отправьте прокси (ip:port:user:pass)", reply_markup=_main_keyboard())
+            await update.message.reply_text("Отправьте прокси (ip:port:user:pass)", reply_markup=_main_keyboard(uid))
 
     elif step == STEP_PROXY_MASS:
         proxies_new = _parse_proxies(text)
@@ -969,9 +989,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if proxies_new:
             data["proxies"] = data.get("proxies", []) + proxies_new
             save_user_data(uid, data)
-            await update.message.reply_text(f"✅ Добавлено {len(proxies_new)} прокси", reply_markup=_main_keyboard())
+            await update.message.reply_text(f"✅ Добавлено {len(proxies_new)} прокси", reply_markup=_main_keyboard(uid))
         else:
-            await update.message.reply_text("Отправьте прокси (каждый с новой строки)", reply_markup=_main_keyboard())
+            await update.message.reply_text("Отправьте прокси (каждый с новой строки)", reply_markup=_main_keyboard(uid))
 
     elif step == STEP_SESS_PROXY_EDIT:
         idx = context.user_data.get("sess_edit_idx", 0)
@@ -980,7 +1000,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             jobs[idx]["proxy"] = "" if text == "-" else text
             save_user_data(uid, data)
         _clear_step(context)
-        await update.message.reply_text("✅ Прокси обновлён", reply_markup=_main_keyboard())
+        await update.message.reply_text("✅ Прокси обновлён", reply_markup=_main_keyboard(uid))
 
     elif step == STEP_SESS_ADD_LINKS:
         links = _parse_links(text)
@@ -990,7 +1010,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             jobs[idx]["links"] = links
             save_user_data(uid, data)
             _clear_step(context)
-            await update.message.reply_text(f"✅ Ссылки обновлены: {len(links)} шт.", reply_markup=_main_keyboard())
+            await update.message.reply_text(f"✅ Ссылки обновлены: {len(links)} шт.", reply_markup=_main_keyboard(uid))
         else:
             await update.message.reply_text("Отправьте ссылки на olx.ba или файл .txt (формат: 1. Link)")
 
@@ -998,26 +1018,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["message"] = text
         save_user_data(uid, data)
         _clear_step(context)
-        await update.message.reply_text("✅ Текст сохранён", reply_markup=_main_keyboard())
+        await update.message.reply_text("✅ Текст сохранён", reply_markup=_main_keyboard(uid))
 
     elif step == STEP_RS_KEY:
         data["telegram_api_key"] = text
         save_user_data(uid, data)
         _clear_step(context)
-        await update.message.reply_text("✅ Ключ сохранён", reply_markup=_main_keyboard())
+        await update.message.reply_text("✅ Ключ сохранён", reply_markup=_main_keyboard(uid))
 
     elif step == STEP_RS_PROXY:
         data["telegram_api_proxy"] = "" if text == "-" else text
         save_user_data(uid, data)
         _clear_step(context)
-        await update.message.reply_text("✅ Прокси сохранён", reply_markup=_main_keyboard())
+        await update.message.reply_text("✅ Прокси сохранён", reply_markup=_main_keyboard(uid))
 
     else:
         if text != "/start":
-            await update.message.reply_text("Нажмите /start", reply_markup=_main_keyboard())
+            await update.message.reply_text("Нажмите /start", reply_markup=_main_keyboard(uid))
 
 
-async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=None, links: list = None):
+async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=None, links: list = None, resume_state: dict = None):
     data = load_user_data(user_id)
     message = data.get("message", "Zdravo!")
     dmin, dmax = data.get("delay_min", 1), data.get("delay_max", 2)
@@ -1027,12 +1047,32 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
 
     accounts = data.get("accounts", [])
     jobs = []
+    completed_set = set()  # (email, url) для фильтрации при resume
+    run_state = None  # сохраняемое состояние для возобновления
 
     proxies = list(data.get("proxies", []))
     proxies_to_remove = []  # заполняется только при успешном входе (on_proxy_used)
 
-    if links:
-        # Режим: ссылки при запуске, ротация по аккаунтам, один прокси на аккаунт (удаляется только после успешного входа)
+    if resume_state:
+        # Режим продолжения: фильтруем уже отправленные
+        links = resume_state.get("links", [])
+        account_emails = resume_state.get("account_emails", [])
+        completed_list = resume_state.get("completed", [])
+        completed_set = {(c[0], c[1]) for c in completed_list if len(c) >= 2}
+        acc_map = {a.get("email"): a for a in accounts}
+        n = len(account_emails) or 1
+        for i, em in enumerate(account_emails):
+            acc = acc_map.get(em)
+            if not acc:
+                continue
+            acc_links = [links[j] for j in range(i, len(links), n) if (em, links[j]) not in completed_set]
+            if acc_links:
+                proxy_str = proxies.pop(0).strip() if proxies else None
+                jobs.append((acc, proxy_str, acc_links))
+        run_state = dict(resume_state)
+    elif links:
+        # Режим: ссылки при запуске, ротация по аккаунтам
+        clear_run_state(user_id)
         if not accounts:
             await context.bot.send_message(user_id, "❌ Добавьте аккаунты.")
             return
@@ -1042,8 +1082,18 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
             if acc_links:
                 proxy_str = proxies.pop(0).strip() if proxies else None
                 jobs.append((acc, proxy_str, acc_links))
+        run_state = {
+            "links": list(links),
+            "account_emails": [a.get("email", "?") for a in accounts],
+            "completed": [],
+            "total_count": len(links),
+            "message": message,
+            "delay_min": dmin,
+            "delay_max": dmax,
+        }
     else:
-        # Режим: сессии из jobs, прокси из сессии или один из списка (удаляется только после успешного входа)
+        # Режим: сессии из jobs
+        clear_run_state(user_id)
         jobs_raw = data.get("jobs", [])
         acc_map = {a.get("email"): a for a in accounts}
         for j in jobs_raw:
@@ -1059,14 +1109,16 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
             jobs.append((acc, proxy_str, acc_links))
 
     if not jobs:
-        await context.bot.send_message(user_id, "❌ Нет сессий с ссылками." if not links else "❌ Нет ссылок.")
+        await context.bot.send_message(user_id, "❌ Нет сессий с ссылками." if not links else "❌ Нет ссылок." if not resume_state else "❌ Всё уже отправлено.")
         return
 
     # Каждый запуск — новый лог: очищаем старые записи для этого пользователя
     _user_logs[user_id] = []
 
     bot_user_id = get_or_create_bot_user_id(user_id)
-    search_id = get_next_search_id()
+    search_id = run_state.get("search_id", get_next_search_id()) if run_state else get_next_search_id()
+    if run_state and "search_id" not in run_state:
+        run_state["search_id"] = search_id
     chat_id = user_id
     if query:
         await query.edit_message_text("▶️ Запуск...")
@@ -1098,6 +1150,8 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
     def on_log(msg: str):
         asyncio.create_task(_log(user_id, msg, context))
 
+    task_id_to_url = {}  # заполняется после built_jobs
+
     def on_status(task_id: str, status: str, error: str = None, account_email: str = None):
         if account_email is None:
             account_email = "?"
@@ -1105,6 +1159,10 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
             stats[account_email] = {"success": 0, "error": 0, "skipped": 0}
         if status == "success":
             stats[account_email]["success"] += 1
+            if run_state and task_id and task_id in task_id_to_url:
+                url = task_id_to_url[task_id]
+                run_state.setdefault("completed", []).append([account_email, url])
+                save_run_state(user_id, run_state)
         elif status == "error":
             stats[account_email]["error"] += 1
         elif status == "skipped":
@@ -1138,7 +1196,11 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
             built_jobs = []
             for acc, proxy_str, acc_links in jobs:
                 tasks = [SendTask(id=str(uuid.uuid4()), listing_url=link, message=message, created_at=0) for link in acc_links]
+                for t in tasks:
+                    task_id_to_url[t.id] = t.listing_url
                 built_jobs.append((acc, proxy_str, tasks))
+            if run_state:
+                save_run_state(user_id, run_state)
 
             def create_link_for_task(task):
                 api_proxy = tg_proxy
@@ -1179,6 +1241,9 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
             total_ok = sum(stats[e]["success"] for e in stats)
             total_fail = sum(stats[e]["error"] + stats[e]["skipped"] for e in stats)
             on_log(f"📊 Итого: успешно {total_ok} / не успешно {total_fail}")
+            if run_state and len(run_state.get("completed", [])) >= run_state.get("total_count", 0):
+                clear_run_state(user_id)
+                on_log("📌 Рассылка полностью завершена")
         except asyncio.CancelledError:
             on_log("⏹ Остановлено")
         except Exception as e:
@@ -1318,7 +1383,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _admin_log(uid, "Открыл бота", context)
     await update.message.reply_text(
         f"🚀 BA Sender\n\nВаш ID: {bot_user_id}\nАккаунтов: {acc_count} | Прокси: {proxy_count} | Сессий: {job_count}\n\nВыберите:",
-        reply_markup=_main_keyboard(),
+        reply_markup=_main_keyboard(uid),
     )
 
 
