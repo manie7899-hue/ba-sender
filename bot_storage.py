@@ -164,6 +164,15 @@ def add_seller_to_blacklist(seller_username: str) -> bool:
     return _save_blacklist(s)
 
 
+def remove_seller_from_blacklist(seller_username: str) -> bool:
+    """Удалить продавца из ЧС (если попал по ошибке)."""
+    if not seller_username or not str(seller_username).strip():
+        return False
+    s = _load_blacklist()
+    s.discard(str(seller_username).strip().lower())
+    return _save_blacklist(s)
+
+
 _APPROVED_FILE = BOT_STORAGE_DIR / "approved_users.json"
 
 

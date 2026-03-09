@@ -19,7 +19,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 from bot_storage import (
     load_user_data, save_user_data, list_pending_users,
     get_or_create_bot_user_id, get_next_search_id,
-    is_seller_blacklisted, add_seller_to_blacklist,
+    is_seller_blacklisted, add_seller_to_blacklist, remove_seller_from_blacklist,
     is_user_banned, add_banned_user, remove_banned_user,
     is_user_approved, add_approved_user,
 )
@@ -1199,6 +1199,7 @@ def main():
     app.add_error_handler(_error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("panel", panel_cmd))
+    app.add_handler(CommandHandler("chs_remove", chs_remove_cmd))
     app.add_handler(CommandHandler("ban", ban_cmd))
     app.add_handler(CommandHandler("unban", unban_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))

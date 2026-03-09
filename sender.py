@@ -681,26 +681,40 @@ class OLXSender:
                     await asyncio.sleep(random.uniform(0.2, 0.4))
                     await self._accept_consent_dialog(page)
                     await asyncio.sleep(0.1)
-                    # Извлекаем никнейм продавца (ссылка /profil/username)
-                    _SKIP_PROFIL = ("aktivni", "zavrseni", "dojmovi", "artikal", "profil", "oglas", "poruke", "poruka", "login")
+                    # Извлекаем никнейм продавца — ТОЛЬКО из блока с кнопкой Poruka (карточка продавца)
+                    # Игнорируем шапку: там "Moj profil" = текущий юзер, его нельзя путать с продавцом
                     try:
-                        for a in await page.query_selector_all('a[href*="/profil/"]'):
-                            href = await a.get_attribute("href") or ""
-                            m = re.search(r"/profil/([^/?]+)", href)
-                            if m:
-                                uname = m.group(1).strip()
-                                if uname.lower() not in _SKIP_PROFIL and not uname.isdigit() and len(uname) >= 2:
-                                    task.seller_username = uname
-                                    self._log(f"Продавец: {task.seller_username}")
-                                    break
+                        seller_username = await page.evaluate("""() => {
+                            const skip = new Set(['aktivni','zavrseni','dojmovi','artikal','profil','oglas','poruke','poruka','login']);
+                            const btn = document.querySelector('a[href*="poruke"], a[href*="poruka"]') ||
+                                Array.from(document.querySelectorAll('a, button')).find(el => /Poruka|Kontaktiraj/i.test(el.textContent || ''));
+                            if (!btn) return null;
+                            const card = btn.closest('[class*="card"],[class*="sidebar"],[class*="seller"],[class*="contact"],[class*="user"],[class*="flex"],aside,section,div');
+                            const scope = card || btn.parentElement;
+                            if (!scope) return null;
+                            const links = scope.querySelectorAll('a[href*="/profil/"]');
+                            for (const a of links) {
+                                const m = (a.getAttribute('href') || '').match(/\\/profil\\/([^/?]+)/);
+                                if (m) {
+                                    const u = m[1].trim().toLowerCase();
+                                    if (u.length >= 2 && !/^\\d+$/.test(u) && !skip.has(u)) return m[1].trim();
+                                }
+                            }
+                            return null;
+                        }""")
+                        if seller_username:
+                            task.seller_username = seller_username
+                            self._log(f"Продавец: {task.seller_username}")
                     except Exception:
                         pass
                     # Проверка чёрного списка (глобальный для всех пользователей)
                     if task.seller_username and is_seller_blacklisted(task.seller_username):
-                        self._log(f"⏭ Пропуск: {task.seller_username} в чёрном списке")
+                        self._log(f"⏭ Пропуск (ЧС): {task.seller_username} — {task.listing_url[:50]}...")
                         if on_status:
                             on_status(task.id, "skipped", "blacklist")
                         return False
+                    if not task.seller_username:
+                        self._log("Продавец не определён — проверка ЧС пропущена")
                     self._log("Поиск кнопки Poruka...")
                     
                     # Шаг 1: Нажать кнопку "Poruka" (Сообщение) в сайдбаре объявления
