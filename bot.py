@@ -1054,22 +1054,19 @@ async def _run_sender(user_id: int, context: ContextTypes.DEFAULT_TYPE, query=No
     proxies_to_remove = []  # заполняется только при успешном входе (on_proxy_used)
 
     if resume_state:
-        # Режим продолжения: фильтруем уже отправленные
+        # Режим продолжения: оставшиеся ссылки (в т.ч. от невалидных аккаунтов) распределяем по текущим валидным
         links = resume_state.get("links", [])
-        account_emails = resume_state.get("account_emails", [])
         completed_list = resume_state.get("completed", [])
-        completed_set = {(c[0], c[1]) for c in completed_list if len(c) >= 2}
-        acc_map = {a.get("email"): a for a in accounts}
-        n = len(account_emails) or 1
-        for i, em in enumerate(account_emails):
-            acc = acc_map.get(em)
-            if not acc:
-                continue
-            acc_links = [links[j] for j in range(i, len(links), n) if (em, links[j]) not in completed_set]
+        completed_urls = {c[1] for c in completed_list if len(c) >= 2}
+        remaining_links = [url for url in links if url not in completed_urls]
+        n = len(accounts) or 1
+        for i, acc in enumerate(accounts):
+            acc_links = [remaining_links[j] for j in range(i, len(remaining_links), n)]
             if acc_links:
                 proxy_str = proxies.pop(0).strip() if proxies else None
                 jobs.append((acc, proxy_str, acc_links))
         run_state = dict(resume_state)
+        run_state["account_emails"] = [a.get("email", "?") for a in accounts]
     elif links:
         # Режим: ссылки при запуске, ротация по аккаунтам
         clear_run_state(user_id)
